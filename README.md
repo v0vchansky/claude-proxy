@@ -40,5 +40,29 @@ Swift-приложение держит UI и ключи (приватный к�
 |---|---|
 | Приватный ключ клиента AmneziaWG | Keychain (генерится при первом запуске, не покидает устройство) |
 | Server profiles | `~/Library/Application Support/ClaudeProxy/servers.json` |
-| Технический лог | `~/Library/Application Support/ClaudeProxy/diagnostics.log` |
+| Технический лог | в памяти ядра (Copy diagnostics), наружу — без ключей/payload |
 | Control socket | `~/Library/Application Support/ClaudeProxy/control.sock` |
+
+## Статус MVP (Definition of Done, §20 ТЗ)
+
+Проверено сквозняком на живом VPS `222.167.208.108`.
+
+- [x] Запускается как macOS menu bar app (без иконки Dock)
+- [x] Выбор server profile (picker + экран Servers)
+- [x] Включение Proxy
+- [x] Поднимается туннель AmneziaWG (handshake подтверждён)
+- [x] Local proxy слушает только `127.0.0.1`
+- [x] HTTPS CONNECT работает
+- [x] Claude Code работает через `localhost:8118` (api.anthropic.com доступен через туннель)
+- [x] Весь proxy-трафик идёт через AWG (egress = IP VPS)
+- [x] При падении AWG нет direct fallback (fail-closed, проверено обрывом peer)
+- [x] UI: connection status, ping, last check, uptime, last error
+- [x] Работает Обновить (health check через туннель)
+- [x] Работает смена сервера (контролируемо, без direct fallback)
+- [x] Copy Public Key
+- [x] Copy Claude command
+- [x] Diagnostics log (Copy diagnostics)
+
+Сервер (§19): peer клиента добавлен, `S3/S4=0`, `awg-quick@awg0` в автозапуске,
+NAT/forward и `ip_forward` персистентны, ребут VPS проверен. Подробности —
+`docs/server-runbook.md`, использование — `docs/usage.md`, сборка — `docs/build-notes.md`.
