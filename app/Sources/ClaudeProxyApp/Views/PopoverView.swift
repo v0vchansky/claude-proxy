@@ -11,8 +11,9 @@ struct PopoverView: View {
         VStack(alignment: .leading, spacing: 12) {
             header
             Divider()
-            proxyToggle
+            modeSwitcher
             statusBlock
+            vpnStatusBlock
             Divider()
             serverBlock
             localProxyBlock
@@ -26,6 +27,7 @@ struct PopoverView: View {
         }
         .padding(14)
         .frame(width: 300)
+        .sheet(isPresented: $model.showVpndOnboarding) { onboardingSheet }
     }
 
     private var header: some View {
@@ -36,18 +38,86 @@ struct PopoverView: View {
         }
     }
 
-    private var proxyToggle: some View {
-        HStack {
-            Text("Proxy").font(.body)
-            Spacer()
-            Toggle("", isOn: Binding(
-                get: { model.isOn },
-                set: { model.toggle(on: $0) }
-            ))
+    // Сегмент Off / Proxy / Full VPN. Взаимное исключение держит AppModel.setMode (§8).
+    private var modeSwitcher: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Picker("", selection: Binding(
+                get: { model.currentMode },
+                set: { model.setMode($0) }
+            )) {
+                Text("Выкл").tag(AppModel.AppMode.off)
+                Text("Прокси").tag(AppModel.AppMode.proxy)
+                Text("Полный VPN").tag(AppModel.AppMode.full)
+            }
+            .pickerStyle(.segmented)
             .labelsHidden()
-            .toggleStyle(.switch)
-            .disabled(model.busy || !model.coreAvailable || model.active == nil)
+            .disabled(model.busy || model.vpnBusy || !model.coreAvailable || model.active == nil)
+
+            if model.active == nil {
+                Text("Нет серверов — добавьте в Серверы…")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
         }
+    }
+
+    // Статус Full VPN — показываем, когда выбран этот режим или идёт его подъём.
+    @ViewBuilder private var vpnStatusBlock: some View {
+        if model.currentMode == .full || model.vpnBusy {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 6) {
+                    Image(systemName: "network.badge.shield.half.filled")
+                    Text("Полный VPN: \(model.vpnStatus.state.title)").font(.caption).bold()
+                    if model.vpnBusy { ProgressView().controlSize(.small).padding(.leading, 4) }
+                }
+                if model.vpnStatus.state == .connected {
+                    if !model.vpnStatus.utun.isEmpty {
+                        Text("Интерфейс: \(model.vpnStatus.utun)")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    Text("Kill-switch: \(model.vpnStatus.killSwitch ? "вкл" : "выкл")")
+                        .font(.caption)
+                        .foregroundStyle(model.vpnStatus.killSwitch ? Color.green : Color.orange)
+                    if model.vpnStatus.doubleVpnWarning {
+                        Text("Внимание: уже активен другой VPN")
+                            .font(.caption).foregroundStyle(.orange)
+                    }
+                }
+            }
+        }
+    }
+
+    // Онбординг установки системного компонента (root-демона vpnd).
+    private var onboardingSheet: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 8) {
+                Image(systemName: "lock.shield").font(.title2)
+                Text("Установить системный компонент").font(.headline)
+            }
+            Text("Полный VPN направляет весь трафик системы через туннель. Для этого нужен системный компонент (root-демон). При установке macOS запросит пароль администратора — он нужен один раз.")
+                .font(.callout).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if !model.uiError.isEmpty {
+                Text(model.uiError).font(.caption).foregroundStyle(.red).textSelection(.enabled)
+            }
+            HStack {
+                Spacer()
+                Button("Отмена") { model.cancelVpndOnboarding() }
+                    .disabled(model.vpnBusy)
+                Button {
+                    model.installVpnd()
+                } label: {
+                    if model.vpnBusy {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Text("Установить")
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(model.vpnBusy)
+            }
+        }
+        .padding(18)
+        .frame(width: 360)
     }
 
     private var statusBlock: some View {
@@ -58,19 +128,19 @@ struct PopoverView: View {
                 if model.busy { ProgressView().controlSize(.small).padding(.leading, 4) }
             }
             if model.core.state == .connected || model.core.state == .error {
-                Text("Ping: \(model.pingText)").font(.caption).foregroundStyle(.secondary)
-                Text("Checked: \(model.lastCheckText)").font(.caption).foregroundStyle(.secondary)
-                Text("Connected for: \(model.uptimeText)").font(.caption).foregroundStyle(.secondary)
-                Text("Traffic: ↓ \(model.rxText)  ↑ \(model.txText)").font(.caption).foregroundStyle(.secondary)
+                Text("Пинг: \(model.pingText)").font(.caption).foregroundStyle(.secondary)
+                Text("Проверено: \(model.lastCheckText)").font(.caption).foregroundStyle(.secondary)
+                Text("На связи: \(model.uptimeText)").font(.caption).foregroundStyle(.secondary)
+                Text("Трафик: ↓ \(model.rxText)  ↑ \(model.txText)").font(.caption).foregroundStyle(.secondary)
             }
         }
     }
 
     private var serverBlock: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text("Server").font(.caption).foregroundStyle(.secondary)
+            Text("Сервер").font(.caption).foregroundStyle(.secondary)
             if model.profiles.isEmpty {
-                Text("Нет серверов — добавьте в Servers…")
+                Text("Нет серверов — добавьте в Серверы…")
                     .font(.caption).foregroundStyle(.secondary)
             } else {
                 Picker("", selection: Binding(
@@ -94,7 +164,7 @@ struct PopoverView: View {
 
     private var localProxyBlock: some View {
         VStack(alignment: .leading, spacing: 2) {
-            Text("Local proxy").font(.caption).foregroundStyle(.secondary)
+            Text("Локальный прокси").font(.caption).foregroundStyle(.secondary)
             Text(model.core.localProxy).font(.system(.caption, design: .monospaced))
         }
     }
@@ -114,7 +184,7 @@ struct PopoverView: View {
             Button {
                 model.copyClaudeCommand(); flash($copiedCmd)
             } label: {
-                Label(copiedCmd ? "Скопировано" : "Copy Claude command",
+                Label(copiedCmd ? "Скопировано" : "Скопировать команду Claude",
                       systemImage: copiedCmd ? "checkmark" : "doc.on.doc")
                     .frame(maxWidth: .infinity)
             }
@@ -123,13 +193,21 @@ struct PopoverView: View {
                 Button {
                     model.copyPublicKey(); flash($copiedKey)
                 } label: {
-                    Text(copiedKey ? "Скопировано" : "Copy Public Key").frame(maxWidth: .infinity)
+                    Text(copiedKey ? "Скопировано" : "Скопировать публичный ключ").frame(maxWidth: .infinity)
                 }
                 Button {
                     model.copyDiagnostics(); flash($copiedDiag)
                 } label: {
-                    Text(copiedDiag ? "Скопировано" : "Copy diagnostics").frame(maxWidth: .infinity)
+                    Text(copiedDiag ? "Скопировано" : "Скопировать диагностику").frame(maxWidth: .infinity)
                 }
+            }
+
+            // Открыть встроенный просмотрщик журнала логов.
+            Button {
+                NSApp.activate(ignoringOtherApps: true)
+                openWindow(id: "logs")
+            } label: {
+                Label("Журнал", systemImage: "list.bullet.rectangle").frame(maxWidth: .infinity)
             }
 
             HStack(spacing: 8) {
@@ -137,20 +215,20 @@ struct PopoverView: View {
                     NSApp.activate(ignoringOtherApps: true)
                     openWindow(id: "servers")
                 } label: {
-                    Text("Servers…").frame(maxWidth: .infinity)
+                    Text("Серверы…").frame(maxWidth: .infinity)
                 }
                 Button {
                     NSApplication.shared.terminate(nil)
                 } label: {
-                    Text("Quit").frame(maxWidth: .infinity)
+                    Text("Выход").frame(maxWidth: .infinity)
                 }
             }
 
             Divider().padding(.vertical, 2)
 
             VStack(alignment: .leading, spacing: 6) {
-                Toggle("Launch at login", isOn: $model.launchAtLogin)
-                Toggle("Enable proxy on launch", isOn: $model.enableOnLaunch)
+                Toggle("Запуск при входе", isOn: $model.launchAtLogin)
+                Toggle("Включать прокси при запуске", isOn: $model.enableOnLaunch)
             }
             .toggleStyle(.checkbox)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -161,7 +239,7 @@ struct PopoverView: View {
 
     private var lastErrorBlock: some View {
         HStack(alignment: .top, spacing: 4) {
-            Text("Last error:").font(.caption).foregroundStyle(.secondary)
+            Text("Последняя ошибка:").font(.caption).foregroundStyle(.secondary)
             Text(model.uiError.isEmpty ? "—" : model.uiError)
                 .font(.caption)
                 .foregroundStyle(model.uiError.isEmpty ? Color.secondary : Color.red)

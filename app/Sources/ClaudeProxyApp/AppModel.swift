@@ -14,6 +14,15 @@ final class AppModel: ObservableObject {
     @Published var busy: Bool = false
     @Published var coreAvailable: Bool = true
 
+    // Журнал логов для встроенного просмотрщика (LogsView).
+    @Published var logLines: [String] = []
+
+    // Full VPN (full-tunnel) — отдельный root-демон vpnd. §8: взаимно исключает Proxy.
+    @Published var vpnStatus = VpnStatus()
+    @Published var vpnBusy: Bool = false
+    @Published var vpnInstalled: Bool = false
+    @Published var showVpndOnboarding: Bool = false
+
     // Прогресс автоматического развёртывания (provision).
     @Published var provisionBusy: Bool = false
     @Published var provisionLog: [String] = []
@@ -30,6 +39,8 @@ final class AppModel: ObservableObject {
     private let store = ProfileStore()
     private let coreProc: CoreProcess
     private let client: ControlClient
+    private let vpnClient = VpnClient()
+    private let vpnInstaller = VpnInstaller()
     private let work = DispatchQueue(label: "claudeproxy.control")
     private var statusTimer: Timer?
     private var provisionTimer: Timer?
@@ -61,6 +72,8 @@ final class AppModel: ObservableObject {
             uiError = "Не найден бинарь ядра (claude-proxy-core)"
         }
 
+        vpnInstalled = vpnInstaller.isInstalled()
+
         startStatusTimer()
         bringUpAsync()
 
@@ -86,7 +99,7 @@ final class AppModel: ObservableObject {
                 pub = try ClientKey.publicKeyBase64()
                 try? (pub + "\n").data(using: .utf8)?.write(to: pubFile)
             } catch {
-                DispatchQueue.main.async { self?.uiError = "Key error: \(error.localizedDescription)" }
+                DispatchQueue.main.async { self?.uiError = "Ошибка ключа: \(error.localizedDescription)" }
             }
             if !priv.isEmpty {
                 DispatchQueue.main.async { self?.privateKeyB64 = priv; self?.publicKey = pub }
@@ -120,7 +133,7 @@ final class AppModel: ObservableObject {
 
     func toggle(on: Bool) {
         if on, active == nil {
-            uiError = "Нет активного сервера — добавьте сервер в Servers…"
+            uiError = "Нет активного сервера — добавьте сервер в Серверы…"
             return
         }
         busy = true
@@ -174,11 +187,177 @@ final class AppModel: ObservableObject {
         }
     }
 
+    // MARK: - Modes (Off / Proxy / Full VPN) — §8 взаимное исключение
+
+    enum AppMode: Hashable { case off, proxy, full }
+
+    /// Текущий режим по состояниям обоих подключений (для сегмента в UI).
+    /// Full VPN имеет приоритет отображения; ошибочные состояния падают в .off,
+    /// а текст ошибки показывает uiError.
+    var currentMode: AppMode {
+        if vpnStatus.state == .connected || vpnStatus.state == .connecting { return .full }
+        if core.state == .connected || core.state == .connecting || core.state == .switching { return .proxy }
+        return .off
+    }
+
+    var vpnConnecting: Bool { vpnStatus.state == .connecting }
+
+    /// Переключение режима из UI. Встречный режим гасится принудительно (§8:
+    /// один WG-ключ = один endpoint, две сессии флапают).
+    func setMode(_ mode: AppMode) {
+        switch mode {
+        case .off:   turnAllOff()
+        case .proxy: enterProxy()
+        case .full:  requestFullVPN()
+        }
+    }
+
+    /// Выключить оба режима.
+    func turnAllOff() {
+        if vpnStatus.state == .connected || vpnStatus.state == .connecting { exitFullVPN() }
+        if core.state != .disconnected { toggle(on: false) }
+    }
+
+    /// Включить Proxy, предварительно погасив Full VPN.
+    func enterProxy() {
+        if active == nil {
+            uiError = "Нет активного сервера — добавьте сервер в Серверы…"
+            return
+        }
+        busy = true
+        uiError = ""
+        let client = self.client
+        let vpn = self.vpnClient
+        let p = self.active
+        let key = self.privateKeyB64
+        let vpnWasUp = vpnStatus.state == .connected || vpnStatus.state == .connecting
+        work.async { [weak self] in
+            var vpnState: VpnStatus?
+            if vpnWasUp { vpnState = try? vpn.disconnectFull() }  // §8: гасим Full VPN
+            let result: Result<CoreState, Error>
+            if let p { result = Result { try client.connect(p, privateKey: key) } }
+            else { result = Result { try client.disconnect() } }
+            DispatchQueue.main.async {
+                if let vs = vpnState { self?.vpnStatus = vs } else if vpnWasUp { self?.vpnStatus = VpnStatus() }
+                self?.apply(result)
+            }
+        }
+    }
+
+    /// Запрос на Full VPN: если демон не установлен — показать онбординг установки,
+    /// иначе подключиться сразу (тем же активным профилем и ключом, что и Proxy).
+    func requestFullVPN() {
+        if active == nil {
+            uiError = "Нет активного сервера — добавьте сервер в Серверы…"
+            return
+        }
+        if !vpnInstalled {
+            showVpndOnboarding = true
+            return
+        }
+        enterFullVPN()
+    }
+
+    /// Включить Full VPN, предварительно погасив Proxy.
+    private func enterFullVPN() {
+        vpnBusy = true
+        uiError = ""
+        let client = self.client
+        let vpn = self.vpnClient
+        let p = self.active
+        let key = self.privateKeyB64
+        let proxyWasUp = core.state != .disconnected
+        work.async { [weak self] in
+            var proxyState: CoreState?
+            if proxyWasUp { proxyState = try? client.disconnect() }  // §8: гасим Proxy
+            guard let p else { DispatchQueue.main.async { self?.vpnBusy = false }; return }
+            let result = Result { try vpn.connectFull(profile: p, privateKey: key) }
+            DispatchQueue.main.async {
+                if let ps = proxyState { self?.core = ps }
+                self?.applyVpn(result)
+            }
+        }
+    }
+
+    /// Выключить Full VPN.
+    func exitFullVPN() {
+        vpnBusy = true
+        uiError = ""
+        let vpn = self.vpnClient
+        work.async { [weak self] in
+            let result = Result { try vpn.disconnectFull() }
+            DispatchQueue.main.async { self?.applyVpn(result) }
+        }
+    }
+
+    private func applyVpn(_ result: Result<VpnStatus, Error>) {
+        vpnBusy = false
+        switch result {
+        case .success(let st):
+            vpnStatus = st
+            uiError = st.lastError
+        case .failure(let err):
+            if case VpnClient.VpnError.notInstalled = err {
+                vpnInstalled = false
+                showVpndOnboarding = true
+            }
+            uiError = (err as? VpnClient.VpnError)?.errorDescription ?? err.localizedDescription
+        }
+    }
+
+    // MARK: - Установка демона vpnd
+
+    /// Ставит root-демон (запрос пароля администратора через osascript), затем
+    /// поднимает Full VPN. Отмену пароля трактуем как отказ от онбординга.
+    func installVpnd() {
+        vpnBusy = true
+        uiError = ""
+        let installer = self.vpnInstaller
+        work.async { [weak self] in
+            let res = Result { try installer.install() }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.vpnBusy = false
+                switch res {
+                case .success:
+                    self.vpnInstalled = true
+                    self.showVpndOnboarding = false
+                    self.enterFullVPN()
+                case .failure(let err):
+                    if case VpnInstaller.InstallError.cancelled = err {
+                        self.showVpndOnboarding = false
+                    }
+                    self.uiError = (err as? VpnInstaller.InstallError)?.errorDescription
+                        ?? err.localizedDescription
+                }
+            }
+        }
+    }
+
+    func cancelVpndOnboarding() { showVpndOnboarding = false }
+
     // MARK: - Status polling
 
     private func startStatusTimer() {
         statusTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.refreshStatusOnce() }
+            Task { @MainActor in
+                self?.refreshStatusOnce()
+                self?.refreshVpnStatusOnce()
+            }
+        }
+    }
+
+    /// Фоновый опрос статуса Full VPN (только если демон установлен).
+    private func refreshVpnStatusOnce() {
+        guard vpnInstalled else { return }
+        let vpn = self.vpnClient
+        work.async { [weak self] in
+            guard let st = try? vpn.statusFull() else { return }
+            DispatchQueue.main.async {
+                guard let self, !self.vpnBusy else { return }
+                self.vpnStatus = st
+                if !st.lastError.isEmpty { self.uiError = st.lastError }
+            }
         }
     }
 
@@ -327,6 +506,16 @@ final class AppModel: ObservableObject {
     func copyPublicKey() { setClipboard(publicKey) }
     func copyClaudeCommand() { setClipboard(claudeCommand) }
 
+    /// Обновляет журнал для встроенного просмотрщика: читает `client.logs()`
+    /// в фоне и публикует в `logLines`. Паттерн захвата client — как у остальных.
+    func refreshLogs() {
+        let client = self.client
+        work.async { [weak self] in
+            let lines = (try? client.logs()) ?? []
+            DispatchQueue.main.async { self?.logLines = lines }
+        }
+    }
+
     func copyDiagnostics() {
         let client = self.client
         work.async { [weak self] in
@@ -347,16 +536,16 @@ final class AppModel: ObservableObject {
         guard core.state == .connected, core.connectedSinceUnix > 0 else { return "—" }
         let secs = max(0, Int(Date().timeIntervalSince1970) - Int(core.connectedSinceUnix))
         let h = secs / 3600, m = (secs % 3600) / 60
-        if h > 0 { return "\(h)h \(m)m" }
+        if h > 0 { return "\(h) ч \(m) мин" }
         let s = secs % 60
-        return "\(m)m \(s)s"
+        return "\(m) мин \(s) с"
     }
 
     var lastCheckText: String {
         guard core.lastCheckUnix > 0 else { return "—" }
         let secs = max(0, Int(Date().timeIntervalSince1970) - Int(core.lastCheckUnix))
-        if secs < 60 { return "\(secs) sec ago" }
-        return "\(secs / 60) min ago"
+        if secs < 60 { return "\(secs) сек назад" }
+        return "\(secs / 60) мин назад"
     }
 
     var pingText: String { core.pingMs >= 0 ? "\(core.pingMs) ms" : "—" }

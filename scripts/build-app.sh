@@ -27,6 +27,11 @@ cp "$APP_BIN" "$APP/Contents/MacOS/ClaudeProxyApp"
 cp "$CORE_BIN" "$APP/Contents/Helpers/claude-proxy-core"
 chmod +x "$APP/Contents/MacOS/ClaudeProxyApp" "$APP/Contents/Helpers/claude-proxy-core"
 
+# Скрипты установки root-демона vpnd — в Resources (их запускает VpnInstaller через osascript).
+cp "$ROOT/scripts/install-vpnd.sh"   "$APP/Contents/Resources/install-vpnd.sh"
+cp "$ROOT/scripts/uninstall-vpnd.sh" "$APP/Contents/Resources/uninstall-vpnd.sh"
+chmod +x "$APP/Contents/Resources/install-vpnd.sh" "$APP/Contents/Resources/uninstall-vpnd.sh"
+
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

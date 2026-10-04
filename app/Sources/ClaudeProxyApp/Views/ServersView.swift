@@ -39,20 +39,20 @@ struct ServersView: View {
 
     private var header: some View {
         HStack {
-            Text("Servers").font(.title3).bold()
+            Text("Серверы").font(.title3).bold()
             Spacer()
             Menu {
-                Button("Auto (по SSH)") {
+                Button("Авто (по SSH)") {
                     model.resetProvisionState()
                     showProvision = true
                 }
-                Button("Manual") { startNew() }
+                Button("Вручную") { startNew() }
             } label: {
-                Label("Add server", systemImage: "plus")
+                Label("Добавить сервер", systemImage: "plus")
             }
             .menuStyle(.borderlessButton)
             .fixedSize()
-            Button("Done") { dismiss() }
+            Button("Готово") { dismiss() }
                 .keyboardShortcut(.defaultAction)
         }
         .padding(12)
@@ -88,24 +88,24 @@ struct ServersView: View {
         VStack(spacing: 0) {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
-                    section("Identity") {
-                        row("Display name") { TextField("", text: $draft.displayName).textFieldStyle(.roundedBorder) }
-                        row("Country") { TextField("", text: $draft.country).textFieldStyle(.roundedBorder) }
-                        row("Provider") { TextField("", text: $draft.provider).textFieldStyle(.roundedBorder) }
+                    section("Профиль") {
+                        row("Название") { TextField("", text: $draft.displayName).textFieldStyle(.roundedBorder) }
+                        row("Страна") { TextField("", text: $draft.country).textFieldStyle(.roundedBorder) }
+                        row("Провайдер") { TextField("", text: $draft.provider).textFieldStyle(.roundedBorder) }
                     }
-                    section("Endpoint") {
-                        row("Host") { TextField("", text: $draft.host).textFieldStyle(.roundedBorder) }
-                        row("Port") {
+                    section("Адрес") {
+                        row("Хост") { TextField("", text: $draft.host).textFieldStyle(.roundedBorder) }
+                        row("Порт") {
                             TextField("", value: $draft.port, format: .number.grouping(.never))
                                 .textFieldStyle(.roundedBorder).frame(width: 110)
                             Spacer(minLength: 0)
                         }
-                        row("Server public key") {
+                        row("Публичный ключ сервера") {
                             TextField("", text: $draft.serverPublicKey)
                                 .textFieldStyle(.roundedBorder).font(.system(.body, design: .monospaced))
                         }
-                        row("Client VPN address") { TextField("", text: $draft.clientVpnAddress).textFieldStyle(.roundedBorder).frame(width: 160); Spacer(minLength: 0) }
-                        row("Server VPN address") { TextField("", text: $draft.serverVpnAddress).textFieldStyle(.roundedBorder).frame(width: 160); Spacer(minLength: 0) }
+                        row("Адрес клиента в VPN") { TextField("", text: $draft.clientVpnAddress).textFieldStyle(.roundedBorder).frame(width: 160); Spacer(minLength: 0) }
+                        row("Адрес сервера в VPN") { TextField("", text: $draft.serverVpnAddress).textFieldStyle(.roundedBorder).frame(width: 160); Spacer(minLength: 0) }
                     }
                     section("AmneziaWG") {
                         Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 8) {
@@ -139,14 +139,14 @@ struct ServersView: View {
 
     private var actionBar: some View {
         HStack(spacing: 8) {
-            Button(isNew ? "Create" : "Save") { save() }
+            Button(isNew ? "Создать" : "Сохранить") { save() }
                 .buttonStyle(.borderedProminent)
-            Button("Set as active") { model.switchServer(draft.id) }
+            Button("Сделать активным") { model.switchServer(draft.id) }
                 .disabled(isNew)
-            Button("Test connection") { model.refresh() }
+            Button("Проверить соединение") { model.refresh() }
                 .disabled(isNew || model.core.state == .disconnected)
             Spacer()
-            Button(role: .destructive) { delete() } label: { Text("Delete") }
+            Button(role: .destructive) { delete() } label: { Text("Удалить") }
                 .disabled(isNew)
         }
         .padding(12)
@@ -194,7 +194,7 @@ struct ServersView: View {
     private func startNew() {
         var p = ServerProfile.defaultHostkey
         p.id = "srv-" + UUID().uuidString.prefix(8).lowercased()
-        p.displayName = "New server"
+        p.displayName = "Новый сервер"
         p.host = ""
         draft = p
         isNew = true
@@ -285,13 +285,13 @@ struct ProvisionView: View {
 
     private var identitySection: some View {
         section("Профиль") {
-            row("Display name") {
+            row("Название") {
                 TextField("", text: $displayName).textFieldStyle(.roundedBorder)
             }
-            row("Country") {
+            row("Страна") {
                 TextField("опционально", text: $country).textFieldStyle(.roundedBorder)
             }
-            row("Provider") {
+            row("Провайдер") {
                 TextField("опционально", text: $provider).textFieldStyle(.roundedBorder)
             }
         }
@@ -299,15 +299,15 @@ struct ProvisionView: View {
 
     private var sshSection: some View {
         section("SSH-доступ") {
-            row("Host / IP") {
+            row("Хост / IP") {
                 TextField("1.2.3.4", text: $host).textFieldStyle(.roundedBorder)
             }
-            row("SSH port") {
+            row("Порт SSH") {
                 TextField("", value: $sshPort, format: .number.grouping(.never))
                     .textFieldStyle(.roundedBorder).frame(width: 110)
                 Spacer(minLength: 0)
             }
-            row("SSH user") {
+            row("Пользователь SSH") {
                 TextField("root", text: $sshUser).textFieldStyle(.roundedBorder).frame(width: 200)
                 Spacer(minLength: 0)
             }
@@ -328,7 +328,7 @@ struct ProvisionView: View {
                 row("Путь к ключу") {
                     TextField("/path/id_ed25519", text: $keyPath).textFieldStyle(.roundedBorder)
                 }
-                row("Passphrase") {
+                row("Пароль ключа") {
                     SecureField("опционально", text: $passphrase).textFieldStyle(.roundedBorder)
                 }
             }
@@ -338,12 +338,12 @@ struct ProvisionView: View {
     private var advancedSection: some View {
         DisclosureGroup("Дополнительно", isExpanded: $showAdvanced) {
             VStack(alignment: .leading, spacing: 8) {
-                row("AWG port") {
+                row("Порт AWG") {
                     TextField("", value: $awgPort, format: .number.grouping(.never))
                         .textFieldStyle(.roundedBorder).frame(width: 110)
                     Spacer(minLength: 0)
                 }
-                row("Client VPN address") {
+                row("Адрес клиента в VPN") {
                     TextField("", text: $clientVpn).textFieldStyle(.roundedBorder).frame(width: 160)
                     Spacer(minLength: 0)
                 }

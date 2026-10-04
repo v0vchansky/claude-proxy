@@ -6,11 +6,11 @@ enum ConnState: String, Codable {
 
     var title: String {
         switch self {
-        case .disconnected: return "Disconnected"
-        case .connecting:   return "Connecting"
-        case .connected:    return "Connected"
-        case .switching:    return "Switching…"
-        case .error:        return "Error"
+        case .disconnected: return "Отключено"
+        case .connecting:   return "Подключение…"
+        case .connected:    return "Подключено"
+        case .switching:    return "Переключение…"
+        case .error:        return "Ошибка"
         }
     }
 }

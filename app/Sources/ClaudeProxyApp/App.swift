@@ -26,10 +26,17 @@ struct ClaudeProxyApp: App {
         // Экран серверов — отдельное окно (а не sheet поверх popover),
         // чтобы его закрытие/Done возвращали в обычное состояние, а клик по
         // иконке всегда показывал popover.
-        Window("Servers", id: "servers") {
+        Window("Серверы", id: "servers") {
             ServersView().environmentObject(model)
         }
         .windowResizability(.contentSize)
         .defaultSize(width: 700, height: 600)
+
+        // Встроенный просмотрщик журнала логов — отдельное окно.
+        Window("Журнал", id: "logs") {
+            LogsView().environmentObject(model)
+        }
+        .windowResizability(.contentSize)
+        .defaultSize(width: 700, height: 560)
     }
 }
