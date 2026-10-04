@@ -77,6 +77,14 @@ struct PopoverView: View {
                     Text("Kill-switch: \(model.vpnStatus.killSwitch ? "вкл" : "выкл")")
                         .font(.caption)
                         .foregroundStyle(model.vpnStatus.killSwitch ? Color.green : Color.orange)
+                    Text("Пинг: \(model.pingText(model.vpnStatus.pingMs))")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Text("Проверено: \(model.agoText(model.vpnStatus.lastCheckUnix))")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Text("На связи: \(model.uptimeText(since: model.vpnStatus.connectedSinceUnix))")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Text("Трафик: ↓ \(model.bytesText(model.vpnStatus.rxBytes))  ↑ \(model.bytesText(model.vpnStatus.txBytes))")
+                        .font(.caption).foregroundStyle(.secondary)
                     if model.vpnStatus.doubleVpnWarning {
                         Text("Внимание: уже активен другой VPN")
                             .font(.caption).foregroundStyle(.orange)
@@ -178,7 +186,7 @@ struct PopoverView: View {
                 Label("Обновить", systemImage: "arrow.clockwise").frame(maxWidth: .infinity)
             }
             .buttonStyle(.borderedProminent)
-            .disabled(model.busy || !model.coreAvailable)
+            .disabled(model.busy || model.vpnBusy || !model.coreAvailable)
             .help("Проверить соединение")
 
             // Скопировать команду запуска Claude Code.

@@ -30,6 +30,38 @@ struct CoreState: Codable, Equatable {
     var rxBytes: Int64 = 0
     var txBytes: Int64 = 0
     var lastError: String = ""
+    // Режим форвардинга локального прокси 8118: tunnel (через свой WG-туннель),
+    // direct (напрямую — трафик заворачивает системный utun Полного VPN), off.
+    // Контракт варианта А: status теперь всегда содержит это поле.
+    var forwardMode: String = "off"
+
+    init() {}
+
+    enum CodingKeys: String, CodingKey {
+        case state, profileId, serverName, serverHost, serverPort, localProxy,
+             pingMs, lastCheckUnix, connectedSinceUnix, lastHandshakeUnix,
+             rxBytes, txBytes, lastError, forwardMode
+    }
+
+    // Терпимое декодирование (как у VpnStatus): недостающий/битый ключ → дефолт,
+    // чтобы один новый/старый ключ не ронял весь разбор статуса в фоне.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        state = (try? c.decode(ConnState.self, forKey: .state)) ?? .disconnected
+        profileId = (try? c.decode(String.self, forKey: .profileId)) ?? ""
+        serverName = (try? c.decode(String.self, forKey: .serverName)) ?? ""
+        serverHost = (try? c.decode(String.self, forKey: .serverHost)) ?? ""
+        serverPort = (try? c.decode(Int.self, forKey: .serverPort)) ?? 0
+        localProxy = (try? c.decode(String.self, forKey: .localProxy)) ?? "127.0.0.1:8118"
+        pingMs = (try? c.decode(Int.self, forKey: .pingMs)) ?? -1
+        lastCheckUnix = (try? c.decode(Int64.self, forKey: .lastCheckUnix)) ?? 0
+        connectedSinceUnix = (try? c.decode(Int64.self, forKey: .connectedSinceUnix)) ?? 0
+        lastHandshakeUnix = (try? c.decode(Int64.self, forKey: .lastHandshakeUnix)) ?? 0
+        rxBytes = (try? c.decode(Int64.self, forKey: .rxBytes)) ?? 0
+        txBytes = (try? c.decode(Int64.self, forKey: .txBytes)) ?? 0
+        lastError = (try? c.decode(String.self, forKey: .lastError)) ?? ""
+        forwardMode = (try? c.decode(String.self, forKey: .forwardMode)) ?? "off"
+    }
 }
 
 /// Server profile. Кодируется ровно теми ключами, которые ждёт ядро.
@@ -136,6 +168,8 @@ struct ControlRequest: Encodable {
     var cmd: String
     var profile: ServerProfile?
     var privateKey: String?
+    // Поле команды `forward`: tunnel|direct|off; при nil JSONEncoder его опускает.
+    var mode: String?
     // Поля для команды `provision`; при nil JSONEncoder их опускает.
     var ssh: SSHConfig?
     var provision: ProvisionParams?

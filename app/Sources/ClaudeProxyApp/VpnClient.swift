@@ -47,10 +47,17 @@ struct VpnStatus: Decodable, Equatable {
     var dnsOverridden: Bool = false
     var doubleVpnWarning: Bool = false
     var lastError: String = ""
+    // Контракт варианта А: status-full/healthcheck-full теперь несут метрики связи.
+    var pingMs: Int = -1          // -1, если проверки ещё не было
+    var lastCheckUnix: Int64 = 0  // момент последнего healthcheck
+    var connectedSinceUnix: Int64 = 0
+    var rxBytes: Int64 = 0
+    var txBytes: Int64 = 0
 
     // Явные CodingKeys: демон шлёт camelCase (как прокси-ядро), фиксируем контракт.
     enum CodingKeys: String, CodingKey {
         case state, utun, serverHost, killSwitch, dnsOverridden, doubleVpnWarning, lastError
+        case pingMs, lastCheckUnix, connectedSinceUnix, rxBytes, txBytes
     }
 
     init() {}
@@ -64,6 +71,11 @@ struct VpnStatus: Decodable, Equatable {
         dnsOverridden = (try? c.decode(Bool.self, forKey: .dnsOverridden)) ?? false
         doubleVpnWarning = (try? c.decode(Bool.self, forKey: .doubleVpnWarning)) ?? false
         lastError = (try? c.decode(String.self, forKey: .lastError)) ?? ""
+        pingMs = (try? c.decode(Int.self, forKey: .pingMs)) ?? -1
+        lastCheckUnix = (try? c.decode(Int64.self, forKey: .lastCheckUnix)) ?? 0
+        connectedSinceUnix = (try? c.decode(Int64.self, forKey: .connectedSinceUnix)) ?? 0
+        rxBytes = (try? c.decode(Int64.self, forKey: .rxBytes)) ?? 0
+        txBytes = (try? c.decode(Int64.self, forKey: .txBytes)) ?? 0
     }
 }
 
@@ -119,6 +131,11 @@ final class VpnClient: @unchecked Sendable {
         try send("status-full", as: VpnStatus.self, recvTimeout: 5)
     }
 
+    /// Активная проверка связи Полного VPN (ping + свежие метрики). Чуть дольше status.
+    func healthcheckFull() throws -> VpnStatus {
+        try send("healthcheck-full", as: VpnStatus.self, recvTimeout: 12)
+    }
+
     /// Поднять full-tunnel. Долгая операция (utun + handshake + маршруты + PF) — 30 с.
     func connectFull(profile: ServerProfile, privateKey: String) throws -> VpnStatus {
         try send("connect-full", profile: profile, privateKey: privateKey,
@@ -140,7 +157,7 @@ final class VpnClient: @unchecked Sendable {
                                     recvTimeout: TimeInterval) throws -> T {
         // Профиль и privateKey кодируются ровно как в connect прокси (ControlRequest).
         let req = ControlRequest(id: allocID(), cmd: cmd, profile: profile, privateKey: privateKey,
-                                 ssh: nil, provision: nil, clientPublicKey: nil)
+                                 mode: nil, ssh: nil, provision: nil, clientPublicKey: nil)
         let data = try JSONEncoder().encode(req)
         let line = try exchange(payload: data, recvTimeout: recvTimeout)
         let resp: ControlResponse<T>

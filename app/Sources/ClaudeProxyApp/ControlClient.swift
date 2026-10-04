@@ -40,12 +40,13 @@ final class ControlClient: @unchecked Sendable {
     func send<T: Decodable>(_ cmd: String,
                             profile: ServerProfile? = nil,
                             privateKey: String? = nil,
+                            mode: String? = nil,
                             ssh: SSHConfig? = nil,
                             provision: ProvisionParams? = nil,
                             clientPublicKey: String? = nil,
                             as type: T.Type,
                             recvTimeout: TimeInterval = 30) throws -> T {
-        let resp = try exchange(cmd, profile: profile, privateKey: privateKey,
+        let resp = try exchange(cmd, profile: profile, privateKey: privateKey, mode: mode,
                                 ssh: ssh, provision: provision, clientPublicKey: clientPublicKey,
                                 as: type, recvTimeout: recvTimeout)
         if !resp.ok {
@@ -62,13 +63,14 @@ final class ControlClient: @unchecked Sendable {
     private func exchange<T: Decodable>(_ cmd: String,
                                         profile: ServerProfile? = nil,
                                         privateKey: String? = nil,
+                                        mode: String? = nil,
                                         ssh: SSHConfig? = nil,
                                         provision: ProvisionParams? = nil,
                                         clientPublicKey: String? = nil,
                                         as type: T.Type,
                                         recvTimeout: TimeInterval = 30) throws -> ControlResponse<T> {
         let req = ControlRequest(id: allocID(), cmd: cmd, profile: profile, privateKey: privateKey,
-                                 ssh: ssh, provision: provision, clientPublicKey: clientPublicKey)
+                                 mode: mode, ssh: ssh, provision: provision, clientPublicKey: clientPublicKey)
         let data = try JSONEncoder().encode(req)
 
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
@@ -153,6 +155,12 @@ final class ControlClient: @unchecked Sendable {
         try send("switch", profile: p, privateKey: privateKey, as: CoreState.self, recvTimeout: 25)
     }
     func disconnect() throws -> CoreState { try send("disconnect", as: CoreState.self, recvTimeout: 10) }
+    /// Переключить режим форвардинга локального прокси 8118: tunnel|direct|off.
+    /// Вариант А: direct заворачивает трафик 8118 в системный utun Полного VPN —
+    /// включать СТРОГО после успешного connectFull (fail-closed).
+    func forward(mode: String) throws -> CoreState {
+        try send("forward", mode: mode, as: CoreState.self, recvTimeout: 10)
+    }
     func healthcheck() throws -> CoreState { try send("healthcheck", as: CoreState.self, recvTimeout: 12) }
     func logs() throws -> [String] { (try send("logs", as: LogsResult.self, recvTimeout: 5)).lines }
 

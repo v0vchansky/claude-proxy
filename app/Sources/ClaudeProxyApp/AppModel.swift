@@ -167,12 +167,28 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Кнопка «Обновить». В режиме Полного VPN проверяет связь демона
+    /// (healthcheck-full), иначе — прокси-ядра (healthcheck), как было.
     func refresh() {
+        if currentMode == .full {
+            refreshVpnHealth()
+            return
+        }
         busy = true
         let client = self.client
         work.async { [weak self] in
             let result = Result { try client.healthcheck() }
             DispatchQueue.main.async { self?.apply(result) }
+        }
+    }
+
+    /// Активная проверка связи Полного VPN по запросу пользователя.
+    func refreshVpnHealth() {
+        vpnBusy = true
+        let vpn = self.vpnClient
+        work.async { [weak self] in
+            let result = Result { try vpn.healthcheckFull() }
+            DispatchQueue.main.async { self?.applyVpn(result) }
         }
     }
 
@@ -212,10 +228,33 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Выключить оба режима.
+    /// Выключить оба режима. Порядок — fail-closed: СНАЧАЛА вернуть прокси из direct
+    /// (чтобы 8118 не ходил напрямую после падения туннеля), потом опустить Полный VPN
+    /// и WG-туннель прокси. Итог: 8118 жив, forwardMode=off, оба туннеля опущены.
     func turnAllOff() {
-        if vpnStatus.state == .connected || vpnStatus.state == .connecting { exitFullVPN() }
-        if core.state != .disconnected { toggle(on: false) }
+        busy = true
+        vpnBusy = true
+        uiError = ""
+        let client = self.client
+        let vpn = self.vpnClient
+        let vpnWasUp = vpnStatus.state == .connected || vpnStatus.state == .connecting
+        let proxyWasUp = core.state != .disconnected
+        work.async { [weak self] in
+            // 1. Вернуть форвард в off (безопасно и идемпотентно в любом состоянии).
+            var proxyState = try? client.forward(mode: "off")
+            // 2. Опустить Полный VPN, если был.
+            var vpnState: VpnStatus?
+            if vpnWasUp { vpnState = try? vpn.disconnectFull() }
+            // 3. Опустить WG-туннель прокси, если был (listener 8118 остаётся жив).
+            if proxyWasUp, let st = try? client.disconnect() { proxyState = st }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.busy = false
+                self.vpnBusy = false
+                if let vs = vpnState { self.vpnStatus = vs } else if vpnWasUp { self.vpnStatus = VpnStatus() }
+                if let ps = proxyState { self.core = ps }
+            }
+        }
     }
 
     /// Включить Proxy, предварительно погасив Full VPN.
@@ -233,7 +272,13 @@ final class AppModel: ObservableObject {
         let vpnWasUp = vpnStatus.state == .connected || vpnStatus.state == .connecting
         work.async { [weak self] in
             var vpnState: VpnStatus?
-            if vpnWasUp { vpnState = try? vpn.disconnectFull() }  // §8: гасим Full VPN
+            if vpnWasUp {
+                // §8 + fail-closed: сперва вернуть прокси из direct, затем опустить
+                // Полный VPN. direct не должен пережить падение системного utun.
+                _ = try? client.forward(mode: "off")
+                vpnState = try? vpn.disconnectFull()
+            }
+            // connect сам поставит forwardMode=tunnel; listener 8118 жив весь переход.
             let result: Result<CoreState, Error>
             if let p { result = Result { try client.connect(p, privateKey: key) } }
             else { result = Result { try client.disconnect() } }
@@ -258,7 +303,13 @@ final class AppModel: ObservableObject {
         enterFullVPN()
     }
 
-    /// Включить Full VPN, предварительно погасив Proxy.
+    /// Включить Full VPN (вариант А). Порядок строго fail-closed:
+    /// 1) поднять Полный VPN;
+    /// 2) ТОЛЬКО при успехе — опустить WG-туннель прокси (listener 8118 остаётся жив,
+    ///    §8: два туннеля на одном WG-ключе не держим) и перевести форвард в direct,
+    ///    чтобы 8118 заворачивал трафик в системный utun Полного VPN;
+    /// 3) если connectFull упал — форвард НЕ трогаем (остаётся как был), показываем ошибку.
+    /// direct НИКОГДА не включается без поднятого Полного VPN.
     private func enterFullVPN() {
         vpnBusy = true
         uiError = ""
@@ -266,12 +317,16 @@ final class AppModel: ObservableObject {
         let vpn = self.vpnClient
         let p = self.active
         let key = self.privateKeyB64
-        let proxyWasUp = core.state != .disconnected
         work.async { [weak self] in
-            var proxyState: CoreState?
-            if proxyWasUp { proxyState = try? client.disconnect() }  // §8: гасим Proxy
             guard let p else { DispatchQueue.main.async { self?.vpnBusy = false }; return }
+            // 1. Поднять Полный VPN.
             let result = Result { try vpn.connectFull(profile: p, privateKey: key) }
+            // 2. Только при успешном connected — опустить туннель прокси и включить direct.
+            var proxyState: CoreState?
+            if case .success(let vs) = result, vs.state == .connected {
+                _ = try? client.disconnect()                       // туннель прокси вниз, mode→off
+                proxyState = try? client.forward(mode: "direct")   // 8118 → системный utun
+            }
             DispatchQueue.main.async {
                 if let ps = proxyState { self?.core = ps }
                 self?.applyVpn(result)
@@ -279,14 +334,21 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Выключить Full VPN.
+    /// Выключить Full VPN. Порядок строго fail-closed: СНАЧАЛА вернуть прокси из direct
+    /// (forward off), и только ПОТОМ опустить Полный VPN — чтобы 8118 не остался
+    /// ходить напрямую после падения системного utun.
     func exitFullVPN() {
         vpnBusy = true
         uiError = ""
+        let client = self.client
         let vpn = self.vpnClient
         work.async { [weak self] in
-            let result = Result { try vpn.disconnectFull() }
-            DispatchQueue.main.async { self?.applyVpn(result) }
+            let proxyState = try? client.forward(mode: "off")   // 1. прокси из direct → off
+            let result = Result { try vpn.disconnectFull() }     // 2. Полный VPN вниз
+            DispatchQueue.main.async {
+                if let ps = proxyState { self?.core = ps }
+                self?.applyVpn(result)
+            }
         }
     }
 
@@ -551,33 +613,46 @@ final class AppModel: ObservableObject {
 
     // MARK: - Derived labels
 
-    var uptimeText: String {
-        guard core.state == .connected, core.connectedSinceUnix > 0 else { return "—" }
-        let secs = max(0, Int(Date().timeIntervalSince1970) - Int(core.connectedSinceUnix))
+    // Общие хелперы по unix-времени/байтам — применяются и к Proxy, и к Full VPN.
+
+    /// «N сек/мин назад» от переданного момента (0 → «—»).
+    func agoText(_ unix: Int64) -> String {
+        guard unix > 0 else { return "—" }
+        let secs = max(0, Int(Date().timeIntervalSince1970) - Int(unix))
+        if secs < 60 { return "\(secs) сек назад" }
+        return "\(secs / 60) мин назад"
+    }
+
+    /// Аптайм от момента соединения (0 → «—»).
+    func uptimeText(since unix: Int64) -> String {
+        guard unix > 0 else { return "—" }
+        let secs = max(0, Int(Date().timeIntervalSince1970) - Int(unix))
         let h = secs / 3600, m = (secs % 3600) / 60
         if h > 0 { return "\(h) ч \(m) мин" }
         let s = secs % 60
         return "\(m) мин \(s) с"
     }
 
-    var lastCheckText: String {
-        guard core.lastCheckUnix > 0 else { return "—" }
-        let secs = max(0, Int(Date().timeIntervalSince1970) - Int(core.lastCheckUnix))
-        if secs < 60 { return "\(secs) сек назад" }
-        return "\(secs / 60) мин назад"
-    }
+    /// Пинг в ms (−1 → «—»).
+    func pingText(_ ms: Int) -> String { ms >= 0 ? "\(ms) ms" : "—" }
 
-    var pingText: String { core.pingMs >= 0 ? "\(core.pingMs) ms" : "—" }
-
-    var rxText: String { Self.humanBytes(core.rxBytes) }
-    var txText: String { Self.humanBytes(core.txBytes) }
-
-    private static func humanBytes(_ n: Int64) -> String {
+    /// Человекочитаемый объём трафика.
+    func bytesText(_ n: Int64) -> String {
         let units = ["B", "KB", "MB", "GB"]
         var v = Double(n), i = 0
         while v >= 1024, i < units.count - 1 { v /= 1024; i += 1 }
         return i == 0 ? "\(n) B" : String(format: "%.1f %@", v, units[i])
     }
+
+    // Производные строки прокси (через общие хелперы).
+
+    var uptimeText: String {
+        core.state == .connected ? uptimeText(since: core.connectedSinceUnix) : "—"
+    }
+    var lastCheckText: String { agoText(core.lastCheckUnix) }
+    var pingText: String { pingText(core.pingMs) }
+    var rxText: String { bytesText(core.rxBytes) }
+    var txText: String { bytesText(core.txBytes) }
 
     /// Иконка menu bar по состоянию (SF Symbol).
     var iconName: String {
