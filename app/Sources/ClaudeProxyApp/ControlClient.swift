@@ -36,12 +36,39 @@ final class ControlClient: @unchecked Sendable {
 
     /// Отправляет запрос и декодирует result указанного типа.
     /// recvTimeout — секунды ожидания ответа (connect/switch долгие).
+    /// Бросает `.core`, если ядро вернуло `ok:false`.
     func send<T: Decodable>(_ cmd: String,
                             profile: ServerProfile? = nil,
                             privateKey: String? = nil,
+                            ssh: SSHConfig? = nil,
+                            provision: ProvisionParams? = nil,
+                            clientPublicKey: String? = nil,
                             as type: T.Type,
                             recvTimeout: TimeInterval = 30) throws -> T {
-        let req = ControlRequest(id: allocID(), cmd: cmd, profile: profile, privateKey: privateKey)
+        let resp = try exchange(cmd, profile: profile, privateKey: privateKey,
+                                ssh: ssh, provision: provision, clientPublicKey: clientPublicKey,
+                                as: type, recvTimeout: recvTimeout)
+        if !resp.ok {
+            throw ControlError.core(resp.error ?? "неизвестная ошибка core")
+        }
+        guard let result = resp.result else {
+            throw ControlError.decodeFailed("нет result")
+        }
+        return result
+    }
+
+    /// Нижний уровень: обмен по сокету, возвращает ответ целиком (включая `result`
+    /// при `ok:false` — нужно для provision, где частичный результат несёт лог).
+    private func exchange<T: Decodable>(_ cmd: String,
+                                        profile: ServerProfile? = nil,
+                                        privateKey: String? = nil,
+                                        ssh: SSHConfig? = nil,
+                                        provision: ProvisionParams? = nil,
+                                        clientPublicKey: String? = nil,
+                                        as type: T.Type,
+                                        recvTimeout: TimeInterval = 30) throws -> ControlResponse<T> {
+        let req = ControlRequest(id: allocID(), cmd: cmd, profile: profile, privateKey: privateKey,
+                                 ssh: ssh, provision: provision, clientPublicKey: clientPublicKey)
         let data = try JSONEncoder().encode(req)
 
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
@@ -101,19 +128,16 @@ final class ControlClient: @unchecked Sendable {
         if line.isEmpty { throw ControlError.ioFailed("пустой ответ") }
 
         do {
-            let resp = try JSONDecoder().decode(ControlResponse<T>.self, from: line)
-            if !resp.ok {
-                throw ControlError.core(resp.error ?? "неизвестная ошибка core")
-            }
-            guard let result = resp.result else {
-                throw ControlError.decodeFailed("нет result")
-            }
-            return result
-        } catch let e as ControlError {
-            throw e
+            return try JSONDecoder().decode(ControlResponse<T>.self, from: line)
         } catch {
             throw ControlError.decodeFailed("\(error)")
         }
+    }
+
+    /// Ошибка провижининга с частичным логом шагов (для показа пользователю).
+    struct ProvisionFailure: Error {
+        let message: String
+        let log: [String]
     }
 
     // Удобные обёртки.
@@ -131,4 +155,16 @@ final class ControlClient: @unchecked Sendable {
     func disconnect() throws -> CoreState { try send("disconnect", as: CoreState.self, recvTimeout: 10) }
     func healthcheck() throws -> CoreState { try send("healthcheck", as: CoreState.self, recvTimeout: 12) }
     func logs() throws -> [String] { (try send("logs", as: LogsResult.self, recvTimeout: 5)).lines }
+
+    /// Разворачивает сервер по SSH. Долгая операция (установка пакета) — таймаут 240 с.
+    /// При ошибке бросает `ProvisionFailure` с частичным логом шагов.
+    func provision(ssh: SSHConfig, params: ProvisionParams, clientPublicKey: String) throws -> ProvisionResult {
+        let resp = try exchange("provision", ssh: ssh, provision: params, clientPublicKey: clientPublicKey,
+                                as: ProvisionResult.self, recvTimeout: 240)
+        if resp.ok, let result = resp.result {
+            return result
+        }
+        throw ProvisionFailure(message: resp.error ?? "неизвестная ошибка core",
+                               log: resp.result?.log ?? [])
+    }
 }

@@ -6,6 +6,7 @@ struct ServersView: View {
     @State private var selectedID: String?
     @State private var draft: ServerProfile = .defaultHostkey
     @State private var isNew = false
+    @State private var showProvision = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -23,6 +24,15 @@ struct ServersView: View {
             draft = model.active
             isNew = false
         }
+        .sheet(isPresented: $showProvision) {
+            ProvisionView { newID in
+                // По успеху — выделяем новый профиль в списке.
+                selectedID = newID
+                draft = model.profiles.first(where: { $0.id == newID }) ?? model.active
+                isNew = false
+            }
+            .environmentObject(model)
+        }
     }
 
     // MARK: - Header
@@ -31,11 +41,17 @@ struct ServersView: View {
         HStack {
             Text("Servers").font(.title3).bold()
             Spacer()
-            Button {
-                startNew()
+            Menu {
+                Button("Auto (по SSH)") {
+                    model.resetProvisionState()
+                    showProvision = true
+                }
+                Button("Manual") { startNew() }
             } label: {
                 Label("Add server", systemImage: "plus")
             }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
             Button("Done") { dismiss() }
                 .keyboardShortcut(.defaultAction)
         }
@@ -195,5 +211,236 @@ struct ServersView: View {
         model.deleteProfile(draft.id)
         selectedID = model.activeID
         draft = model.active
+    }
+}
+
+// MARK: - Provisioning (авторазвёртывание по SSH)
+
+/// Форма автоматического развёртывания сервера по SSH.
+/// Секреты (пароль/ключ) держатся только в @State на время вызова и не сохраняются.
+struct ProvisionView: View {
+    @EnvironmentObject var model: AppModel
+    @Environment(\.dismiss) private var dismiss
+
+    /// Вызывается по успешному развёртывании с id нового профиля.
+    let onDone: (String) -> Void
+
+    private enum AuthMethod: String, CaseIterable, Identifiable {
+        case password, key
+        var id: String { rawValue }
+        var title: String { self == .password ? "Пароль" : "Приватный ключ" }
+    }
+
+    @State private var displayName = ""
+    @State private var country = ""
+    @State private var provider = ""
+    @State private var host = ""
+    @State private var sshPort = 22
+    @State private var sshUser = "root"
+    @State private var auth: AuthMethod = .password
+    @State private var password = ""
+    @State private var keyPath = ""
+    @State private var passphrase = ""
+    @State private var showAdvanced = false
+    @State private var awgPort = 51820
+    @State private var clientVpn = "10.77.0.2"
+
+    private var canSubmit: Bool {
+        guard !host.trimmingCharacters(in: .whitespaces).isEmpty else { return false }
+        switch auth {
+        case .password: return !password.isEmpty
+        case .key:      return !keyPath.trimmingCharacters(in: .whitespaces).isEmpty
+        }
+    }
+
+    private var succeeded: Bool { !model.provisionedID.isEmpty }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text("Развернуть сервер").font(.title3).bold()
+                Spacer()
+            }
+            .padding(12)
+            Divider()
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    identitySection
+                    sshSection
+                    advancedSection
+                    if model.provisionBusy || !model.provisionLog.isEmpty || !model.provisionError.isEmpty {
+                        progressSection
+                    }
+                }
+                .padding(16)
+            }
+            Divider()
+            actionBar
+        }
+        .frame(width: 560, height: 620)
+    }
+
+    // MARK: Секции
+
+    private var identitySection: some View {
+        section("Профиль") {
+            row("Display name") {
+                TextField("", text: $displayName).textFieldStyle(.roundedBorder)
+            }
+            row("Country") {
+                TextField("опционально", text: $country).textFieldStyle(.roundedBorder)
+            }
+            row("Provider") {
+                TextField("опционально", text: $provider).textFieldStyle(.roundedBorder)
+            }
+        }
+    }
+
+    private var sshSection: some View {
+        section("SSH-доступ") {
+            row("Host / IP") {
+                TextField("1.2.3.4", text: $host).textFieldStyle(.roundedBorder)
+            }
+            row("SSH port") {
+                TextField("", value: $sshPort, format: .number.grouping(.never))
+                    .textFieldStyle(.roundedBorder).frame(width: 110)
+                Spacer(minLength: 0)
+            }
+            row("SSH user") {
+                TextField("root", text: $sshUser).textFieldStyle(.roundedBorder).frame(width: 200)
+                Spacer(minLength: 0)
+            }
+            row("Аутентификация") {
+                Picker("", selection: $auth) {
+                    ForEach(AuthMethod.allCases) { m in Text(m.title).tag(m) }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(width: 240)
+                Spacer(minLength: 0)
+            }
+            if auth == .password {
+                row("Пароль") {
+                    SecureField("", text: $password).textFieldStyle(.roundedBorder)
+                }
+            } else {
+                row("Путь к ключу") {
+                    TextField("/path/id_ed25519", text: $keyPath).textFieldStyle(.roundedBorder)
+                }
+                row("Passphrase") {
+                    SecureField("опционально", text: $passphrase).textFieldStyle(.roundedBorder)
+                }
+            }
+        }
+    }
+
+    private var advancedSection: some View {
+        DisclosureGroup("Дополнительно", isExpanded: $showAdvanced) {
+            VStack(alignment: .leading, spacing: 8) {
+                row("AWG port") {
+                    TextField("", value: $awgPort, format: .number.grouping(.never))
+                        .textFieldStyle(.roundedBorder).frame(width: 110)
+                    Spacer(minLength: 0)
+                }
+                row("Client VPN address") {
+                    TextField("", text: $clientVpn).textFieldStyle(.roundedBorder).frame(width: 160)
+                    Spacer(minLength: 0)
+                }
+            }
+            .padding(.top, 8)
+        }
+        .font(.caption.bold())
+        .foregroundStyle(.secondary)
+    }
+
+    private var progressSection: some View {
+        section(succeeded ? "Готово" : (model.provisionBusy ? "Разворачиваем…" : "Журнал")) {
+            if !model.provisionError.isEmpty {
+                Text(model.provisionError)
+                    .foregroundStyle(.red)
+                    .textSelection(.enabled)
+            }
+            ScrollView {
+                VStack(alignment: .leading, spacing: 2) {
+                    ForEach(Array(model.provisionLog.enumerated()), id: \.offset) { _, line in
+                        Text(line)
+                            .font(.system(.caption, design: .monospaced))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+                .padding(8)
+            }
+            .frame(height: 160)
+            .background(Color(nsColor: .textBackgroundColor))
+            .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color.secondary.opacity(0.25)))
+            .textSelection(.enabled)
+        }
+    }
+
+    private var actionBar: some View {
+        HStack(spacing: 8) {
+            if model.provisionBusy {
+                ProgressView().controlSize(.small)
+                Text("Это может занять до пары минут…").font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer()
+            if succeeded {
+                Button("Готово") {
+                    let id = model.provisionedID
+                    model.resetProvisionState()
+                    onDone(id)
+                    dismiss()
+                }
+                .buttonStyle(.borderedProminent)
+            } else {
+                Button("Отмена") { dismiss() }.disabled(model.provisionBusy)
+                Button("Развернуть") { submit() }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!canSubmit || model.provisionBusy)
+            }
+        }
+        .padding(12)
+    }
+
+    // MARK: Действия
+
+    private func submit() {
+        let ssh = SSHConfig(
+            host: host.trimmingCharacters(in: .whitespaces),
+            port: sshPort,
+            user: sshUser.isEmpty ? "root" : sshUser,
+            password: auth == .password && !password.isEmpty ? password : nil,
+            privateKeyPath: auth == .key && !keyPath.isEmpty ? keyPath.trimmingCharacters(in: .whitespaces) : nil,
+            passphrase: auth == .key && !passphrase.isEmpty ? passphrase : nil
+        )
+        var params = ProvisionParams()
+        params.awgPort = awgPort
+        params.clientVpnAddress = clientVpn.trimmingCharacters(in: .whitespaces)
+        model.provision(displayName: displayName.trimmingCharacters(in: .whitespaces),
+                        country: country.trimmingCharacters(in: .whitespaces),
+                        provider: provider.trimmingCharacters(in: .whitespaces),
+                        ssh: ssh,
+                        params: params)
+    }
+
+    // MARK: Building blocks
+
+    private func section<Content: View>(_ title: String, @ViewBuilder _ content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title.uppercased())
+                .font(.caption).bold()
+                .foregroundStyle(.secondary)
+            content()
+        }
+    }
+
+    private func row<Content: View>(_ label: String, @ViewBuilder _ field: () -> Content) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Text(label)
+                .frame(width: 150, alignment: .leading)
+                .foregroundStyle(.secondary)
+            field()
+        }
     }
 }

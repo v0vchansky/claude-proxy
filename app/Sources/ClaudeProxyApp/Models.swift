@@ -79,12 +79,67 @@ struct ServerProfile: Codable, Identifiable, Equatable {
     )
 }
 
+/// Параметры SSH-доступа для автоматического развёртывания сервера.
+/// `password` и `privateKeyPath` опциональны, но хотя бы одно должно быть задано.
+/// Сериализуется ровно теми ключами, что ждёт ядро; nil-поля JSONEncoder опускает.
+struct SSHConfig: Codable {
+    var host: String
+    var port: Int = 22
+    var user: String = "root"
+    var password: String?
+    var privateKeyPath: String?
+    var passphrase: String?
+}
+
+/// Параметры развёртывания AmneziaWG. Все поля с дефолтами из контракта провижининга.
+struct ProvisionParams: Codable {
+    var awgPort: Int = 51820
+    var serverVpnAddress: String = "10.77.0.1"
+    var clientVpnAddress: String = "10.77.0.2"
+    var jc: Int = 5
+    var jmin: Int = 50
+    var jmax: Int = 1000
+    var s1: Int = 64
+    var s2: Int = 128
+    var h1: UInt32 = 1000001
+    var h2: UInt32 = 1000002
+    var h3: UInt32 = 1000003
+    var h4: UInt32 = 1000004
+}
+
+/// Результат развёртывания (provision.Result в ядре).
+/// `log` — пошаговый журнал; при ошибке приходит частичный результат с заполненным `log`.
+struct ProvisionResult: Decodable {
+    var serverPublicKey: String = ""
+    var host: String = ""
+    var port: Int = 51820
+    var serverVpnAddress: String = "10.77.0.1"
+    var clientVpnAddress: String = "10.77.0.2"
+    var jc: Int = 0
+    var jmin: Int = 0
+    var jmax: Int = 0
+    var s1: Int = 0
+    var s2: Int = 0
+    var s3: Int = 0
+    var s4: Int = 0
+    var h1: UInt32 = 0
+    var h2: UInt32 = 0
+    var h3: UInt32 = 0
+    var h4: UInt32 = 0
+    var adopted: Bool = false
+    var log: [String] = []
+}
+
 /// Запрос к ядру.
 struct ControlRequest: Encodable {
     var id: Int
     var cmd: String
     var profile: ServerProfile?
     var privateKey: String?
+    // Поля для команды `provision`; при nil JSONEncoder их опускает.
+    var ssh: SSHConfig?
+    var provision: ProvisionParams?
+    var clientPublicKey: String?
 }
 
 /// Ответ ядра.

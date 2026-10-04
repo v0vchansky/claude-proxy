@@ -14,6 +14,12 @@ final class AppModel: ObservableObject {
     @Published var busy: Bool = false
     @Published var coreAvailable: Bool = true
 
+    // Прогресс автоматического развёртывания (provision).
+    @Published var provisionBusy: Bool = false
+    @Published var provisionLog: [String] = []
+    @Published var provisionError: String = ""
+    @Published var provisionedID: String = ""
+
     @Published var launchAtLogin: Bool = LaunchAtLogin.isEnabled {
         didSet { LaunchAtLogin.set(launchAtLogin) }
     }
@@ -169,6 +175,80 @@ final class AppModel: ObservableObject {
                 if !st.lastError.isEmpty { self.uiError = st.lastError }
             }
         }
+    }
+
+    // MARK: - Provisioning
+
+    /// Разворачивает новый сервер по SSH и, по успеху, добавляет профиль и делает его активным.
+    /// Секреты (пароль/ключ) живут только в переданном `ssh` на время вызова — никуда не сохраняются.
+    func provision(displayName: String,
+                   country: String,
+                   provider: String,
+                   ssh: SSHConfig,
+                   params: ProvisionParams) {
+        provisionBusy = true
+        provisionError = ""
+        provisionedID = ""
+        provisionLog = ["Подключаемся к \(ssh.host)…"]
+
+        let client = self.client
+        let pub = self.publicKey
+        work.async { [weak self] in
+            do {
+                let res = try client.provision(ssh: ssh, params: params, clientPublicKey: pub)
+                let id = "srv-" + UUID().uuidString.prefix(8).lowercased()
+                let profile = ServerProfile(
+                    id: id,
+                    displayName: displayName.isEmpty ? res.host : displayName,
+                    country: country,
+                    provider: provider,
+                    host: res.host,
+                    port: res.port,
+                    serverPublicKey: res.serverPublicKey,
+                    clientVpnAddress: res.clientVpnAddress,
+                    serverVpnAddress: res.serverVpnAddress,
+                    dns: ["1.1.1.1", "8.8.8.8"],
+                    mtu: 1420,
+                    persistentKeepalive: 25,
+                    jc: res.jc, jmin: res.jmin, jmax: res.jmax,
+                    s1: res.s1, s2: res.s2, s3: 0, s4: 0,
+                    h1: res.h1, h2: res.h2, h3: res.h3, h4: res.h4
+                )
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    self.store.upsert(profile)
+                    self.store.setActive(profile.id)
+                    self.profiles = self.store.profiles
+                    self.activeID = self.store.activeID
+                    self.provisionLog = res.log
+                    self.provisionedID = profile.id
+                    self.provisionBusy = false
+                }
+            } catch let e as ControlClient.ProvisionFailure {
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    self.provisionLog = e.log
+                    self.provisionError = e.message
+                    self.provisionBusy = false
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    let msg = (error as? ControlClient.ControlError)?.errorDescription
+                        ?? error.localizedDescription
+                    self.provisionError = msg
+                    self.provisionBusy = false
+                }
+            }
+        }
+    }
+
+    /// Сбрасывает состояние прогресса (при открытии формы заново).
+    func resetProvisionState() {
+        provisionBusy = false
+        provisionLog = []
+        provisionError = ""
+        provisionedID = ""
     }
 
     // MARK: - Profiles management
