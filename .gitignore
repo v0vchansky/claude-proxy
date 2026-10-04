@@ -17,3 +17,8 @@ xcuserdata/
 # Go
 /core/claude-proxy-core
 /core/bin/
+
+# SwiftPM
+.build/
+.swiftpm/
+*.xcodeproj

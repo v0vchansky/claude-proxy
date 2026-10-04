@@ -1,0 +1,252 @@
+import Foundation
+import SwiftUI
+import AppKit
+
+@MainActor
+final class AppModel: ObservableObject {
+    static let shared = AppModel()
+
+    @Published var core = CoreState()
+    @Published var profiles: [ServerProfile] = []
+    @Published var activeID: String = ""
+    @Published var publicKey: String = ""
+    @Published var uiError: String = ""
+    @Published var busy: Bool = false
+    @Published var coreAvailable: Bool = true
+
+    @Published var launchAtLogin: Bool = LaunchAtLogin.isEnabled {
+        didSet { LaunchAtLogin.set(launchAtLogin) }
+    }
+    @Published var enableOnLaunch: Bool = UserDefaults.standard.bool(forKey: "enableOnLaunch") {
+        didSet { UserDefaults.standard.set(enableOnLaunch, forKey: "enableOnLaunch") }
+    }
+
+    private let store = ProfileStore()
+    private let coreProc: CoreProcess
+    private let client: ControlClient
+    private let work = DispatchQueue(label: "claudeproxy.control")
+    private var statusTimer: Timer?
+    private var privateKeyB64: String = ""
+
+    init() {
+        let sock = AppPaths.controlSocket.path
+        self.coreProc = CoreProcess(socketPath: sock, proxyAddr: "127.0.0.1:8118")
+        self.client = ControlClient(socketPath: sock)
+        self.profiles = store.profiles
+        self.activeID = store.activeID
+    }
+
+    var active: ServerProfile { store.active }
+
+    var claudeCommand: String {
+        let addr = core.localProxy.isEmpty ? "127.0.0.1:8118" : core.localProxy
+        return "HTTP_PROXY=http://\(addr) HTTPS_PROXY=http://\(addr) claude"
+    }
+
+    // MARK: - Lifecycle
+
+    func bootstrap() {
+        // Ключи.
+        do {
+            privateKeyB64 = try ClientKey.loadOrCreatePrivateKeyBase64()
+            publicKey = try ClientKey.publicKeyBase64()
+            // Публичный ключ не секрет — кладём в файл для удобного добавления на VPS.
+            let pubFile = AppPaths.supportDir.appendingPathComponent("client-public.key")
+            try? (publicKey + "\n").data(using: .utf8)?.write(to: pubFile)
+        } catch {
+            uiError = "Key error: \(error.localizedDescription)"
+        }
+
+        // Ядро.
+        coreAvailable = coreProc.start()
+        if !coreAvailable {
+            uiError = "Не найден бинарь ядра (claude-proxy-core)"
+        }
+
+        waitForCoreThenStart()
+        startStatusTimer()
+
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.shutdown() }
+        }
+    }
+
+    private func waitForCoreThenStart() {
+        let client = self.client
+        let shouldAuto = self.enableOnLaunch
+        let p = self.active
+        let key = self.privateKeyB64
+        work.async { [weak self] in
+            // Ждём доступности сокета до ~5с.
+            var ok = false
+            for _ in 0..<50 {
+                if (try? client.ping()) == true { ok = true; break }
+                usleep(100_000)
+            }
+            guard ok else { return }
+            if shouldAuto, !key.isEmpty {
+                let result = Result { try client.connect(p, privateKey: key) }
+                DispatchQueue.main.async { self?.apply(result) }
+            } else if let st = try? client.status() {
+                DispatchQueue.main.async { self?.core = st }
+            }
+        }
+    }
+
+    func shutdown() {
+        statusTimer?.invalidate()
+        _ = try? client.disconnect()
+        coreProc.stop()
+    }
+
+    // MARK: - Actions
+
+    func toggle(on: Bool) {
+        busy = true
+        let client = self.client
+        let p = self.active
+        let key = self.privateKeyB64
+        work.async { [weak self] in
+            let result: Result<CoreState, Error> = on
+                ? Result { try client.connect(p, privateKey: key) }
+                : Result { try client.disconnect() }
+            DispatchQueue.main.async { self?.apply(result) }
+        }
+    }
+
+    func switchServer(_ id: String) {
+        store.setActive(id)
+        activeID = id
+        let wasConnected = core.state == .connected || core.state == .error || core.state == .switching
+        if !wasConnected { return }
+        busy = true
+        let client = self.client
+        let p = self.active
+        let key = self.privateKeyB64
+        work.async { [weak self] in
+            let result = Result { try client.switchServer(p, privateKey: key) }
+            DispatchQueue.main.async { self?.apply(result) }
+        }
+    }
+
+    func refresh() {
+        busy = true
+        let client = self.client
+        work.async { [weak self] in
+            let result = Result { try client.healthcheck() }
+            DispatchQueue.main.async { self?.apply(result) }
+        }
+    }
+
+    private func apply(_ result: Result<CoreState, Error>) {
+        busy = false
+        switch result {
+        case .success(let st):
+            core = st
+            uiError = st.lastError
+        case .failure(let err):
+            uiError = (err as? ControlClient.ControlError)?.errorDescription ?? err.localizedDescription
+        }
+    }
+
+    // MARK: - Status polling
+
+    private func startStatusTimer() {
+        statusTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.refreshStatusOnce() }
+        }
+    }
+
+    private func refreshStatusOnce() {
+        let client = self.client
+        work.async { [weak self] in
+            guard let st = try? client.status() else { return }
+            DispatchQueue.main.async {
+                guard let self, !self.busy else { return }
+                self.core = st
+                if !st.lastError.isEmpty { self.uiError = st.lastError }
+            }
+        }
+    }
+
+    // MARK: - Profiles management
+
+    func upsertProfile(_ p: ServerProfile) {
+        store.upsert(p)
+        profiles = store.profiles
+    }
+
+    func deleteProfile(_ id: String) {
+        store.delete(id)
+        profiles = store.profiles
+        activeID = store.activeID
+    }
+
+    // MARK: - Clipboard
+
+    func copyPublicKey() { setClipboard(publicKey) }
+    func copyClaudeCommand() { setClipboard(claudeCommand) }
+
+    func copyDiagnostics() {
+        let client = self.client
+        work.async { [weak self] in
+            let lines = (try? client.logs()) ?? []
+            DispatchQueue.main.async { self?.setClipboard(lines.joined(separator: "\n")) }
+        }
+    }
+
+    private func setClipboard(_ s: String) {
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setString(s, forType: .string)
+    }
+
+    // MARK: - Derived labels
+
+    var uptimeText: String {
+        guard core.state == .connected, core.connectedSinceUnix > 0 else { return "—" }
+        let secs = max(0, Int(Date().timeIntervalSince1970) - Int(core.connectedSinceUnix))
+        let h = secs / 3600, m = (secs % 3600) / 60
+        if h > 0 { return "\(h)h \(m)m" }
+        let s = secs % 60
+        return "\(m)m \(s)s"
+    }
+
+    var lastCheckText: String {
+        guard core.lastCheckUnix > 0 else { return "—" }
+        let secs = max(0, Int(Date().timeIntervalSince1970) - Int(core.lastCheckUnix))
+        if secs < 60 { return "\(secs) sec ago" }
+        return "\(secs / 60) min ago"
+    }
+
+    var pingText: String { core.pingMs >= 0 ? "\(core.pingMs) ms" : "—" }
+
+    /// Иконка menu bar по состоянию (SF Symbol).
+    var iconName: String {
+        switch core.state {
+        case .connected:              return "shield.lefthalf.filled"
+        case .connecting, .switching: return "shield"
+        case .error:                  return "exclamationmark.shield"
+        case .disconnected:           return "shield.slash"
+        }
+    }
+
+    var isOn: Bool {
+        switch core.state {
+        case .connected, .connecting, .switching: return true
+        case .error: return true
+        case .disconnected: return false
+        }
+    }
+
+    var statusColor: Color {
+        switch core.state {
+        case .connected:              return .green
+        case .connecting, .switching: return .yellow
+        case .error:                  return .red
+        case .disconnected:           return .secondary
+        }
+    }
+}
