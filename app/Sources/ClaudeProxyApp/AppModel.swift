@@ -313,8 +313,18 @@ final class AppModel: ObservableObject {
         vpnBusy = true
         uiError = ""
         let installer = self.vpnInstaller
+        let vpn = self.vpnClient
         work.async { [weak self] in
             let res = Result { try installer.install() }
+            // launchctl bootstrap асинхронный — сокет демона появляется не мгновенно.
+            // Ждём готовности (ping) до ~8с, иначе первый connect упрётся в «не установлен».
+            var ready = false
+            if case .success = res {
+                for _ in 0..<40 {
+                    if vpn.ping() != nil { ready = true; break }
+                    usleep(200_000)
+                }
+            }
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.vpnBusy = false
@@ -322,7 +332,8 @@ final class AppModel: ObservableObject {
                 case .success:
                     self.vpnInstalled = true
                     self.showVpndOnboarding = false
-                    self.enterFullVPN()
+                    if ready { self.enterFullVPN() }
+                    else { self.uiError = "Демон установлен, но ещё запускается — выберите «Полный VPN» ещё раз" }
                 case .failure(let err):
                     if case VpnInstaller.InstallError.cancelled = err {
                         self.showVpndOnboarding = false
@@ -349,8 +360,16 @@ final class AppModel: ObservableObject {
 
     /// Фоновый опрос статуса Full VPN (только если демон установлен).
     private func refreshVpnStatusOnce() {
-        guard vpnInstalled else { return }
         let vpn = self.vpnClient
+        // Если демон ещё не помечен установленным — проверяем сокет: мог появиться
+        // после установки. Как только ответил ping, помечаем установленным.
+        if !vpnInstalled {
+            work.async { [weak self] in
+                guard vpn.ping() != nil else { return }
+                DispatchQueue.main.async { self?.vpnInstalled = true }
+            }
+            return
+        }
         work.async { [weak self] in
             guard let st = try? vpn.statusFull() else { return }
             DispatchQueue.main.async {
