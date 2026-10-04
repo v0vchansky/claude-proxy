@@ -160,7 +160,7 @@ final class ControlClient: @unchecked Sendable {
     /// При ошибке бросает `ProvisionFailure` с частичным логом шагов.
     func provision(ssh: SSHConfig, params: ProvisionParams, clientPublicKey: String) throws -> ProvisionResult {
         let resp = try exchange("provision", ssh: ssh, provision: params, clientPublicKey: clientPublicKey,
-                                as: ProvisionResult.self, recvTimeout: 240)
+                                as: ProvisionResult.self, recvTimeout: 360)
         if resp.ok, let result = resp.result {
             return result
         }
