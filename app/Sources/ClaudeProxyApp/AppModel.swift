@@ -52,25 +52,16 @@ final class AppModel: ObservableObject {
     // MARK: - Lifecycle
 
     func bootstrap() {
-        // Ключи.
-        do {
-            privateKeyB64 = try ClientKey.loadOrCreatePrivateKeyBase64()
-            publicKey = try ClientKey.publicKeyBase64()
-            // Публичный ключ не секрет — кладём в файл для удобного добавления на VPS.
-            let pubFile = AppPaths.supportDir.appendingPathComponent("client-public.key")
-            try? (publicKey + "\n").data(using: .utf8)?.write(to: pubFile)
-        } catch {
-            uiError = "Key error: \(error.localizedDescription)"
-        }
-
-        // Ядро.
+        // Ядро поднимаем СРАЗУ и НЕ зависим от Keychain: доступ к ключу может показать
+        // системный диалог (особенно после пересборки с новой подписью) — он не должен
+        // блокировать запуск ядра/сокета/UI на главном потоке. Ключи грузим в фоне.
         coreAvailable = coreProc.start()
         if !coreAvailable {
             uiError = "Не найден бинарь ядра (claude-proxy-core)"
         }
 
-        waitForCoreThenStart()
         startStatusTimer()
+        bringUpAsync()
 
         NotificationCenter.default.addObserver(
             forName: NSApplication.willTerminateNotification, object: nil, queue: .main
@@ -79,21 +70,38 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func waitForCoreThenStart() {
+    /// Фоновая инициализация: загрузка ключей (может показать диалог Keychain),
+    /// ожидание готовности ядра и, при включённой опции, автоподключение.
+    private func bringUpAsync() {
         let client = self.client
         let shouldAuto = self.enableOnLaunch
         let p = self.active
-        let key = self.privateKeyB64
+        let pubFile = AppPaths.supportDir.appendingPathComponent("client-public.key")
         work.async { [weak self] in
-            // Ждём доступности сокета до ~5с.
+            // 1. Ключи (в фоне, чтобы диалог Keychain не морозил приложение).
+            var priv = "", pub = ""
+            do {
+                priv = try ClientKey.loadOrCreatePrivateKeyBase64()
+                pub = try ClientKey.publicKeyBase64()
+                try? (pub + "\n").data(using: .utf8)?.write(to: pubFile)
+            } catch {
+                DispatchQueue.main.async { self?.uiError = "Key error: \(error.localizedDescription)" }
+            }
+            if !priv.isEmpty {
+                DispatchQueue.main.async { self?.privateKeyB64 = priv; self?.publicKey = pub }
+            }
+
+            // 2. Ждём готовности ядра (~5с).
             var ok = false
             for _ in 0..<50 {
                 if (try? client.ping()) == true { ok = true; break }
                 usleep(100_000)
             }
             guard ok else { return }
-            if shouldAuto, !key.isEmpty {
-                let result = Result { try client.connect(p, privateKey: key) }
+
+            // 3. Автоподключение или просто начальный статус.
+            if shouldAuto, !priv.isEmpty {
+                let result = Result { try client.connect(p, privateKey: priv) }
                 DispatchQueue.main.async { self?.apply(result) }
             } else if let st = try? client.status() {
                 DispatchQueue.main.async { self?.core = st }
