@@ -76,9 +76,10 @@ func (d *Daemon) Status() State {
 	return st
 }
 
-// Logs возвращает строки технического лога.
+// Logs возвращает строки технического лога за последние 3 дня: персистентный
+// журнал (Journal) при включённом файле, иначе — кольцевой буфер памяти.
 func (d *Daemon) Logs() []string {
-	return d.log.Lines()
+	return d.log.Journal()
 }
 
 // dial — единственный путь наружу для proxy. Если туннеля нет, соединение не
@@ -243,6 +244,12 @@ func (d *Daemon) bringUp(p profile.Profile, privateKey string) error {
 	}
 	d.mu.Unlock()
 
+	if herr != nil {
+		d.log.Logf("Connected: %s (health check pending: %v)", p.DisplayName, herr)
+	} else {
+		d.log.Logf("Connected: %s (%d ms)", p.DisplayName, ms)
+	}
+
 	d.startHealthLoop()
 	return nil
 }
@@ -361,6 +368,8 @@ func (d *Daemon) runHealthTick(ctx context.Context) {
 	d.mu.Unlock()
 	if err == nil {
 		d.log.Logf("Health check: %d ms", ms)
+	} else {
+		d.log.Logf("Health check failed: %v", err)
 	}
 }
 

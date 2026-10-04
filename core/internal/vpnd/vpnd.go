@@ -70,7 +70,7 @@ func (h *Handler) dispatch(line []byte) response {
 		// Пока лог демона пуст: реальные события появятся с VPN-логикой (§10).
 		var lines []string
 		if h.log != nil {
-			lines = h.log.Lines()
+			lines = h.log.Journal()
 		}
 		if lines == nil {
 			lines = []string{}

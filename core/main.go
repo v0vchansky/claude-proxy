@@ -16,6 +16,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/v0vchansky/claude-proxy/core/internal/control"
 	"github.com/v0vchansky/claude-proxy/core/internal/ipc"
@@ -29,12 +30,44 @@ import (
 // версию не отдаёт — его формат зафиксирован и не меняется.
 const coreVersion = "0.1.0"
 
-func defaultSockPath() string {
+// logRetention — сколько хранить персистентный журнал диагностики. 72h = 3 дня.
+const logRetention = 72 * time.Hour
+
+func appSupportDir() (string, error) {
 	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, "Library", "Application Support", "ClaudeProxy"), nil
+}
+
+func defaultSockPath() string {
+	dir, err := appSupportDir()
 	if err != nil {
 		return "/tmp/claude-proxy.sock"
 	}
-	return filepath.Join(home, "Library", "Application Support", "ClaudeProxy", "control.sock")
+	return filepath.Join(dir, "control.sock")
+}
+
+// newLog создаёт персистентный журнал диагностики в
+// <Application Support>/ClaudeProxy/diagnostics.log с ретеншеном logRetention.
+// При любой ошибке (нет доступа к пути и т.п.) деградирует на память-онли буфер
+// и фиксирует причину в самом логе — процесс не падает.
+func newLog() *logbuf.Buffer {
+	dir, err := appSupportDir()
+	if err != nil {
+		l := logbuf.New(500)
+		l.Logf("Diagnostics log: память-онли (не удалось определить путь: %v)", err)
+		return l
+	}
+	path := filepath.Join(dir, "diagnostics.log")
+	l, err := logbuf.NewWithFile(500, path, logRetention)
+	if err != nil {
+		l = logbuf.New(500)
+		l.Logf("Diagnostics log: память-онли (файл %s недоступен: %v)", path, err)
+		return l
+	}
+	return l
 }
 
 func main() {
@@ -72,7 +105,7 @@ func main() {
 
 // runProxy — текущий proxy-режим без изменений: proxy-демон + control-сокет.
 func runProxy(sockPath, proxyAddr, healthTarget string, verbose bool) {
-	log := logbuf.New(500)
+	log := newLog()
 	log.Logf("App started (core)")
 
 	daemon := control.NewDaemon(proxyAddr, healthTarget, log, verbose)
@@ -93,6 +126,7 @@ func runProxy(sockPath, proxyAddr, healthTarget string, verbose bool) {
 		log.Logf("Shutting down")
 		daemon.Shutdown()
 		_ = srv.Close()
+		_ = log.Close()
 		os.Exit(0)
 	}()
 
@@ -106,7 +140,7 @@ func runProxy(sockPath, proxyAddr, healthTarget string, verbose bool) {
 // runVpnd — скелет vpnd-режима: только ipc-транспорт + vpnd-Handler, БЕЗ запуска
 // proxy/туннеля. Реальная VPN-логика появится в задачах 4–8 (§10).
 func runVpnd(sockPath string) {
-	log := logbuf.New(500)
+	log := newLog()
 	log.Logf("App started (vpnd)")
 
 	handler := vpnd.NewHandler(coreVersion, log)
@@ -124,6 +158,7 @@ func runVpnd(sockPath string) {
 		<-sigCh
 		log.Logf("Shutting down")
 		_ = srv.Close()
+		_ = log.Close()
 		os.Exit(0)
 	}()
 
