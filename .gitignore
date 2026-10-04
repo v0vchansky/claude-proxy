@@ -1,0 +1,19 @@
+# Secrets — никогда в git
+*.key
+*.privkey
+*.conf
+secrets/
+.env
+*.pem
+
+# macOS / сборка
+.DS_Store
+/dist/
+/build/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+
+# Go
+/core/claude-proxy-core
+/core/bin/
