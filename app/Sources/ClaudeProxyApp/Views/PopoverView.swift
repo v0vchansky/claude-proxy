@@ -26,7 +26,7 @@ struct PopoverView: View {
             lastErrorBlock
         }
         .padding(14)
-        .frame(width: 300)
+        .frame(width: 340)
         .sheet(isPresented: $model.showVpndOnboarding) { onboardingSheet }
     }
 
@@ -179,6 +179,7 @@ struct PopoverView: View {
             }
             .buttonStyle(.borderedProminent)
             .disabled(model.busy || !model.coreAvailable)
+            .help("Проверить соединение")
 
             // Скопировать команду запуска Claude Code.
             Button {
@@ -188,6 +189,7 @@ struct PopoverView: View {
                       systemImage: copiedCmd ? "checkmark" : "doc.on.doc")
                     .frame(maxWidth: .infinity)
             }
+            .help("Скопировать команду запуска Claude Code через прокси")
 
             HStack(spacing: 8) {
                 Button {
@@ -195,11 +197,13 @@ struct PopoverView: View {
                 } label: {
                     Text(copiedKey ? "Скопировано" : "Скопировать публичный ключ").frame(maxWidth: .infinity)
                 }
+                .help("Скопировать публичный ключ клиента для добавления на сервер")
                 Button {
                     model.copyDiagnostics(); flash($copiedDiag)
                 } label: {
                     Text(copiedDiag ? "Скопировано" : "Скопировать диагностику").frame(maxWidth: .infinity)
                 }
+                .help("Скопировать технический журнал за последние 3 дня")
             }
 
             // Открыть встроенный просмотрщик журнала логов.
@@ -209,6 +213,7 @@ struct PopoverView: View {
             } label: {
                 Label("Журнал", systemImage: "list.bullet.rectangle").frame(maxWidth: .infinity)
             }
+            .help("Открыть окно журнала логов")
 
             HStack(spacing: 8) {
                 Button {
@@ -217,11 +222,13 @@ struct PopoverView: View {
                 } label: {
                     Text("Серверы…").frame(maxWidth: .infinity)
                 }
+                .help("Управление серверами")
                 Button {
                     NSApplication.shared.terminate(nil)
                 } label: {
                     Text("Выход").frame(maxWidth: .infinity)
                 }
+                .help("Закрыть приложение")
             }
 
             Divider().padding(.vertical, 2)
