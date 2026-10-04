@@ -2,7 +2,7 @@
 //
 // Транспорт — internal/ipc (JSON Lines `{id,cmd,...}` → `{id,ok,result|error}`), тот же
 // формат, что у proxy-control, но набор команд свой (§5): ping, logs, connect-full,
-// disconnect-full, status-full. Handler только разбирает запрос и делегирует Manager'у
+// disconnect-full, status-full, healthcheck-full. Handler только разбирает запрос и делегирует Manager'у
 // (manager.go), который и выполняет фазовую оркестрацию utun/маршрутов/DNS/PF (§4),
 // crash-recovery и watchdog (§9). Приватный ключ живёт только в памяти на время
 // запроса и НЕ логируется.
@@ -107,6 +107,11 @@ func (h *Handler) dispatch(line []byte) response {
 			return response{ID: req.ID, OK: false, Error: "status-full: оркестратор не инициализирован"}
 		}
 		return response{ID: req.ID, OK: true, Result: h.mgr.Status()}
+	case "healthcheck-full":
+		if h.mgr == nil {
+			return response{ID: req.ID, OK: false, Error: "healthcheck-full: оркестратор не инициализирован"}
+		}
+		return response{ID: req.ID, OK: true, Result: h.mgr.Healthcheck()}
 	default:
 		return response{ID: req.ID, OK: false, Error: "неизвестная команда: " + req.Cmd}
 	}

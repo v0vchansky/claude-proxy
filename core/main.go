@@ -113,6 +113,13 @@ func runProxy(sockPath, proxyAddr, healthTarget string, verbose bool) {
 
 	daemon := control.NewDaemon(proxyAddr, healthTarget, log, verbose)
 
+	// Listener 8118 поднимается один раз и живёт до завершения процесса (вариант А):
+	// порт доступен всегда, а connect/disconnect/forward лишь переключают dial-режим.
+	if err := daemon.StartProxy(); err != nil {
+		fmt.Fprintf(os.Stderr, "не удалось поднять local proxy %s: %v\n", proxyAddr, err)
+		os.Exit(1)
+	}
+
 	srv, err := control.NewServer(daemon, sockPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "не удалось открыть control-сокет %s: %v\n", sockPath, err)

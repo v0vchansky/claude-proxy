@@ -12,6 +12,7 @@ import (
 type request struct {
 	ID              int                  `json:"id"`
 	Cmd             string               `json:"cmd"`
+	Mode            string               `json:"mode,omitempty"`
 	Profile         *profile.Profile     `json:"profile,omitempty"`
 	PrivKey         string               `json:"privateKey,omitempty"`
 	SSH             *provision.SSHConfig `json:"ssh,omitempty"`
@@ -30,7 +31,7 @@ type response struct {
 // Server обслуживает proxy-протокол поверх транспорта ipc. Транспорт даёт сокет,
 // accept-loop и построчное чтение/запись; Server предоставляет ему Handler с
 // JSON-диспетчем команд proxy-режима (ping/status/connect/disconnect/switch/
-// healthcheck/logs/provision). Внешнее поведение протокола неизменно.
+// healthcheck/forward/logs/provision). Внешнее поведение протокола неизменно.
 type Server struct {
 	d   *Daemon
 	ipc *ipc.Server
@@ -101,6 +102,9 @@ func (s *Server) dispatch(line []byte) response {
 		return result(req.ID, st, err)
 	case "healthcheck":
 		return response{ID: req.ID, OK: true, Result: s.d.Healthcheck()}
+	case "forward":
+		st, err := s.d.Forward(ForwardMode(req.Mode))
+		return result(req.ID, st, err)
 	case "provision":
 		if req.SSH == nil {
 			return response{ID: req.ID, OK: false, Error: "provision: отсутствует ssh"}

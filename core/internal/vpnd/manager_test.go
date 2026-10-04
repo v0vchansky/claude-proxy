@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"net"
 	"net/netip"
 	"path/filepath"
 	"strings"
@@ -112,6 +113,14 @@ func newTestManager(t *testing.T, tun *fakeTunnel) *Manager {
 		},
 		capture: fakeCapture,
 		st:      vpnmut.State{Phase: vpnmut.PhaseClean},
+		// health-dial на фейке: без реального сетевого выхода. net.Pipe даёт готовый
+		// conn, который health.Check закрывает сразу после замера RTT.
+		healthDial: func(context.Context, string, string) (net.Conn, error) {
+			c, _ := net.Pipe()
+			return c, nil
+		},
+		healthTarget: "1.1.1.1:443",
+		pingMs:       -1,
 	}
 }
 
@@ -411,5 +420,93 @@ func assertSeq(t *testing.T, label string, got, want []string) {
 		if got[i] != want[i] {
 			t.Fatalf("%s: команда #%d:\n got=%q\nwant=%q", label, i, got[i], want[i])
 		}
+	}
+}
+
+// --- health / status-full (задача 2) ------------------------------------------
+
+// TestStatusFullHasHealthFields — свежий менеджер отдаёт новые ключи health с
+// дефолтами и НЕ теряет существующие ключи status-full.
+func TestStatusFullHasHealthFields(t *testing.T) {
+	m := newTestManager(t, nil)
+	res := m.Status()
+
+	for _, k := range []string{"pingMs", "lastCheckUnix", "connectedSinceUnix"} {
+		if _, ok := res[k]; !ok {
+			t.Fatalf("status-full: нет ключа %q", k)
+		}
+	}
+	if res["pingMs"] != -1 {
+		t.Fatalf("pingMs вне сеанса должен быть -1, got %v", res["pingMs"])
+	}
+	if res["connectedSinceUnix"] != int64(0) || res["lastCheckUnix"] != int64(0) {
+		t.Fatalf("вне сеанса таймстемпы должны быть 0: %+v", res)
+	}
+	// Существующие ключи на месте (контракт для Swift).
+	for _, k := range []string{"state", "phase", "utun", "serverHost", "killSwitch", "dnsOverridden"} {
+		if _, ok := res[k]; !ok {
+			t.Fatalf("status-full: пропал существующий ключ %q", k)
+		}
+	}
+}
+
+// TestConnectSetsConnectedSince — после connect connectedSinceUnix заполнен.
+func TestConnectSetsConnectedSince(t *testing.T) {
+	m := newTestManager(t, nil)
+	res, err := m.Connect(testProfile(), "priv")
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	if cs, _ := res["connectedSinceUnix"].(int64); cs <= 0 {
+		t.Fatalf("connectedSinceUnix должен быть > 0 после connect, got %v", res["connectedSinceUnix"])
+	}
+}
+
+// TestHealthcheckFullUpdatesPing — healthcheck-full в сеансе обновляет pingMs и
+// lastCheckUnix (фейковый dial даёт успешный замер).
+func TestHealthcheckFullUpdatesPing(t *testing.T) {
+	m := newTestManager(t, nil)
+	if _, err := m.Connect(testProfile(), "priv"); err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	res := m.Healthcheck()
+	if ms, _ := res["pingMs"].(int); ms < 1 {
+		t.Fatalf("после healthcheck-full pingMs должен быть >= 1, got %v", res["pingMs"])
+	}
+	if lc, _ := res["lastCheckUnix"].(int64); lc <= 0 {
+		t.Fatalf("lastCheckUnix должен быть > 0 после healthcheck-full, got %v", res["lastCheckUnix"])
+	}
+}
+
+// TestHealthcheckFullNotConnectedNoop — вне сеанса healthcheck-full не трогает ping.
+func TestHealthcheckFullNotConnectedNoop(t *testing.T) {
+	m := newTestManager(t, nil)
+	res := m.Healthcheck()
+	if res["pingMs"] != -1 {
+		t.Fatalf("healthcheck-full вне сеанса не должен менять pingMs, got %v", res["pingMs"])
+	}
+	if res["lastCheckUnix"] != int64(0) {
+		t.Fatalf("healthcheck-full вне сеанса не должен ставить lastCheckUnix, got %v", res["lastCheckUnix"])
+	}
+}
+
+// TestDisconnectResetsHealth — teardown сбрасывает health-поля.
+func TestDisconnectResetsHealth(t *testing.T) {
+	m := newTestManager(t, nil)
+	if _, err := m.Connect(testProfile(), "priv"); err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	// Наполним ping до disconnect.
+	m.Healthcheck()
+
+	res, err := m.Disconnect()
+	if err != nil {
+		t.Fatalf("disconnect: %v", err)
+	}
+	if res["pingMs"] != -1 {
+		t.Fatalf("после disconnect pingMs должен быть -1, got %v", res["pingMs"])
+	}
+	if res["connectedSinceUnix"] != int64(0) || res["lastCheckUnix"] != int64(0) {
+		t.Fatalf("после disconnect таймстемпы health должны быть 0: %+v", res)
 	}
 }

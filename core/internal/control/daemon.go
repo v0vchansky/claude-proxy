@@ -54,9 +54,10 @@ func NewDaemon(proxyAddr, healthTarget string, log *logbuf.Buffer, verbose bool)
 		log:          log,
 		verbose:      verbose,
 		st: State{
-			State:      StateDisconnected,
-			LocalProxy: proxyAddr,
-			PingMs:     -1,
+			State:       StateDisconnected,
+			LocalProxy:  proxyAddr,
+			ForwardMode: ForwardOff,
+			PingMs:      -1,
 		},
 	}
 }
@@ -82,16 +83,71 @@ func (d *Daemon) Logs() []string {
 	return d.log.Journal()
 }
 
-// dial — единственный путь наружу для proxy. Если туннеля нет, соединение не
-// устанавливается (fail-closed): прямого выхода в системную сеть не существует.
+// dial — единственный путь наружу для proxy. Стратегия выбирается по текущему
+// forward-режиму под мьютексом (атомарный снимок mode+tun):
+//   - tunnel: только через активный WG-туннель; нет туннеля → ошибка (fail-closed);
+//   - direct: прямой net.Dial (безопасен лишь под активным Полным VPN — так его
+//     ставит приложение);
+//   - off: соединения отклоняются (fail-closed, ничего не активно).
 func (d *Daemon) dial(ctx context.Context, network, address string) (net.Conn, error) {
 	d.mu.Lock()
+	mode := d.st.ForwardMode
 	t := d.tun
 	d.mu.Unlock()
-	if t == nil {
-		return nil, fmt.Errorf("Tunnel not initialized")
+
+	switch mode {
+	case ForwardTunnel:
+		if t == nil {
+			return nil, fmt.Errorf("Tunnel not initialized")
+		}
+		return t.DialContext(ctx, network, address)
+	case ForwardDirect:
+		var dialer net.Dialer
+		return dialer.DialContext(ctx, network, address)
+	default: // ForwardOff и любое неизвестное значение — fail-closed.
+		return nil, fmt.Errorf("Proxy forwarding disabled")
 	}
-	return t.DialContext(ctx, network, address)
+}
+
+// StartProxy поднимает постоянный listener 8118 один раз за жизнь процесса. Listener
+// не гасится при disconnect — умирает только при Shutdown. Так порт 8118 всегда
+// доступен (Claude Code с HTTP_PROXY работает и в Полном VPN через direct-режим).
+func (d *Daemon) StartProxy() error {
+	d.mu.Lock()
+	running := d.prx != nil
+	d.mu.Unlock()
+	if running {
+		return nil
+	}
+	prx, addr, err := proxy.Start(d.proxyAddr, d.dial, d.log.Logf)
+	if err != nil {
+		return err
+	}
+	d.mu.Lock()
+	d.prx = prx
+	d.proxyAddr = addr
+	d.st.LocalProxy = addr
+	mode := d.st.ForwardMode
+	d.mu.Unlock()
+	d.log.Logf("Proxy listening on %s (постоянный listener, forwardMode=%s)", addr, mode)
+	return nil
+}
+
+// Forward атомарно переключает forward-режим прокси и возвращает текущий State.
+// connect/disconnect его тоже двигают (tunnel/off); direct ставит только приложение
+// явной командой на время Полного VPN. Listener не трогается.
+func (d *Daemon) Forward(mode ForwardMode) (State, error) {
+	switch mode {
+	case ForwardTunnel, ForwardDirect, ForwardOff:
+	default:
+		return d.Status(), fmt.Errorf("forward: неизвестный режим %q (ожидалось tunnel|direct|off)", mode)
+	}
+	d.mu.Lock()
+	prev := d.st.ForwardMode
+	d.st.ForwardMode = mode
+	d.mu.Unlock()
+	d.log.Logf("Forward mode: %s → %s", prev, mode)
+	return d.Status(), nil
 }
 
 // Connect поднимает туннель по профилю и запускает local proxy.
@@ -208,19 +264,15 @@ func (d *Daemon) bringUp(p profile.Profile, privateKey string) error {
 	}
 	d.log.Logf("Handshake established")
 
+	// Туннель поднят → переключаем dial-стратегию на tunnel атомарно вместе с tun.
+	// Listener 8118 уже слушает (StartProxy при старте), отдельно поднимать не нужно.
 	d.mu.Lock()
 	d.tun = t
 	d.prof = p
 	d.priv = privateKey
+	d.st.ForwardMode = ForwardTunnel
 	d.mu.Unlock()
-
-	if err := d.ensureProxy(); err != nil {
-		d.mu.Lock()
-		d.tun = nil
-		d.mu.Unlock()
-		t.Close()
-		return err
-	}
+	d.log.Logf("Forward mode: tunnel (туннель поднят)")
 
 	// Первая проверка — наполнить ping перед выдачей Connected.
 	hctx, hcancel := context.WithTimeout(context.Background(), healthDialTO)
@@ -254,45 +306,21 @@ func (d *Daemon) bringUp(p profile.Profile, privateKey string) error {
 	return nil
 }
 
-func (d *Daemon) ensureProxy() error {
-	d.mu.Lock()
-	running := d.prx != nil
-	d.mu.Unlock()
-	if running {
-		return nil
-	}
-	prx, addr, err := proxy.Start(d.proxyAddr, d.dial, d.log.Logf)
-	if err != nil {
-		return err
-	}
-	d.mu.Lock()
-	d.prx = prx
-	d.proxyAddr = addr
-	d.st.LocalProxy = addr
-	d.mu.Unlock()
-	d.log.Logf("Proxy listening on %s", addr)
-	return nil
-}
-
-// teardown останавливает health loop, proxy и туннель. Вызывается под opMu.
+// teardown останавливает health loop и WG-туннель и переводит forward-режим в off.
+// Listener 8118 НЕ трогает — он живёт до Shutdown. Вызывается под opMu.
 func (d *Daemon) teardown(reason string) {
 	d.stopHealthLoop()
 
 	d.mu.Lock()
-	prx := d.prx
 	tun := d.tun
-	d.prx = nil
 	d.tun = nil
 	d.priv = ""
+	d.st.ForwardMode = ForwardOff
 	d.mu.Unlock()
 
-	if prx != nil {
-		prx.Stop()
-		d.log.Logf("Proxy stopped (%s)", reason)
-	}
 	if tun != nil {
 		tun.Close()
-		d.log.Logf("Tunnel stopped (%s)", reason)
+		d.log.Logf("Tunnel stopped (%s); forward mode: off", reason)
 	}
 }
 
@@ -401,9 +429,19 @@ func (d *Daemon) fail(err error) State {
 	return d.Status()
 }
 
-// Shutdown корректно гасит демон при завершении процесса.
+// Shutdown корректно гасит демон при завершении процесса: сначала туннель, затем
+// постоянный listener 8118 (только здесь он и освобождается).
 func (d *Daemon) Shutdown() {
 	d.opMu.Lock()
 	defer d.opMu.Unlock()
 	d.teardown("завершение процесса")
+
+	d.mu.Lock()
+	prx := d.prx
+	d.prx = nil
+	d.mu.Unlock()
+	if prx != nil {
+		prx.Stop()
+		d.log.Logf("Proxy stopped (завершение процесса)")
+	}
 }

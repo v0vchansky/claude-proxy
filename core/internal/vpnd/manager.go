@@ -3,10 +3,12 @@ package vpnd
 import (
 	"context"
 	"fmt"
+	"net"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/v0vchansky/claude-proxy/core/internal/health"
 	"github.com/v0vchansky/claude-proxy/core/internal/killswitch"
 	"github.com/v0vchansky/claude-proxy/core/internal/logbuf"
 	"github.com/v0vchansky/claude-proxy/core/internal/netcfg"
@@ -16,6 +18,16 @@ import (
 
 // handshakeTimeout — потолок ожидания первого handshake в фазе 1 (как в прокси, §4).
 const handshakeTimeout = 10 * time.Second
+
+const (
+	// healthInterval — период health-тика, пока phase=connected (как у прокси, §4).
+	healthInterval = 15 * time.Second
+	// healthDialTO — таймаут одной health-проверки.
+	healthDialTO = 8 * time.Second
+	// healthTarget — цель проверки. В Полном VPN «через туннель» = обычный dial до
+	// этого адреса: системный маршрут уже заведён в utun.
+	healthTarget = "1.1.1.1:443"
+)
 
 // session — параметры активного сеанса, нужные watchdog'у для переустановки
 // слетевших слоёв (PF-якорь, host-route) без повторного preflight.
@@ -45,6 +57,15 @@ type Manager struct {
 	session *session
 
 	wdStop chan struct{} // закрытие останавливает watchdog-горутину
+	hcStop chan struct{} // закрытие останавливает health-горутину
+
+	// health-проверка туннеля (как у прокси). healthDial вынесен за поле, чтобы в
+	// тестах подменить фейком без реального сетевого выхода.
+	healthDial         health.DialFunc
+	healthTarget       string
+	pingMs             int   // последний измеренный RTT, мс; -1 если проверки нет/упала
+	lastCheckUnix      int64 // unix-время последней health-проверки
+	connectedSinceUnix int64 // unix-время перехода в connected; 0 вне сеанса
 }
 
 // NewManager собирает боевой Manager: exec поверх os/exec, туннель через fullvpn,
@@ -62,6 +83,12 @@ func NewManager(statePath string, strict bool, log *logbuf.Buffer) *Manager {
 		open:      realOpener,
 		capture:   netcfg.Capture,
 		st:        vpnmut.State{Phase: vpnmut.PhaseClean},
+		healthDial: func(ctx context.Context, network, address string) (net.Conn, error) {
+			var d net.Dialer
+			return d.DialContext(ctx, network, address)
+		},
+		healthTarget: healthTarget,
+		pingMs:       -1,
 	}
 }
 
@@ -200,7 +227,14 @@ func (m *Manager) Connect(p profile.Profile, privateKeyB64 string) (map[string]a
 	}
 
 	m.session = &session{pfRules: pfRules, serverIP: serverIP, gateway: gateway, utun: m.st.Utun}
+	m.connectedSinceUnix = time.Now().Unix()
+	m.pingMs = -1
+	m.lastCheckUnix = 0
 	m.startWatchdogLocked()
+	m.startHealthLoopLocked()
+	// Первую проверку запускаем асинхронно: держать mu во время сетевого dial нельзя
+	// (блокирует status). Горутина возьмёт mu уже после выхода из Connect.
+	go m.healthCheckNow(context.Background())
 
 	m.logf(fmt.Sprintf("connect-full: подключено (utun=%s, server=%s, doubleVPN=%v)", m.st.Utun, serverIP, doubleVPN))
 	res := m.statusLocked()
@@ -263,7 +297,11 @@ func (m *Manager) teardownLocked(ctx context.Context, keepPF bool) []error {
 	}
 
 	m.stopWatchdogLocked()
+	m.stopHealthLoopLocked()
 	m.session = nil
+	m.connectedSinceUnix = 0
+	m.pingMs = -1
+	m.lastCheckUnix = 0
 	m.st = vpnmut.State{Phase: vpnmut.PhaseClean}
 	if err := m.writeState(); err != nil {
 		errs = append(errs, fmt.Errorf("write clean state: %w", err))
@@ -271,17 +309,97 @@ func (m *Manager) teardownLocked(ctx context.Context, keepPF bool) []error {
 	return errs
 }
 
+// Healthcheck выполняет health-проверку сейчас и возвращает обновлённый status-full
+// (команда healthcheck-full — кнопка «Обновить» в UI). Вне сеанса просто отдаёт
+// текущее состояние.
+func (m *Manager) Healthcheck() map[string]any {
+	m.healthCheckNow(context.Background())
+	return m.Status()
+}
+
+// healthCheckNow делает одну проверку туннеля (dial до healthTarget с замером RTT)
+// и обновляет pingMs/lastCheckUnix. Сетевой dial идёт БЕЗ удержания mu; состояние
+// читается/пишется короткими критическими секциями. Вне connected — ничего не делает.
+func (m *Manager) healthCheckNow(ctx context.Context) {
+	m.mu.Lock()
+	connected := m.st.Phase == vpnmut.PhaseConnected
+	dial := m.healthDial
+	target := m.healthTarget
+	m.mu.Unlock()
+	if !connected || dial == nil {
+		return
+	}
+
+	hctx, cancel := context.WithTimeout(ctx, healthDialTO)
+	ms, err := health.Check(hctx, dial, target)
+	cancel()
+
+	m.mu.Lock()
+	// Пока шёл dial, сеанс мог завершиться (disconnect/teardown). Тогда результат
+	// не записываем — поля health должны остаться сброшенными.
+	if m.st.Phase != vpnmut.PhaseConnected {
+		m.mu.Unlock()
+		return
+	}
+	m.lastCheckUnix = time.Now().Unix()
+	if err != nil {
+		m.pingMs = -1
+	} else {
+		m.pingMs = ms
+	}
+	m.mu.Unlock()
+
+	if err != nil {
+		m.logf("health-full: проверка не удалась: " + err.Error())
+	} else {
+		m.logf(fmt.Sprintf("health-full: %d мс", ms))
+	}
+}
+
+// startHealthLoopLocked запускает health-горутину сеанса (тик healthInterval, пока
+// phase=connected). Требует mu.
+func (m *Manager) startHealthLoopLocked() {
+	m.stopHealthLoopLocked()
+	stop := make(chan struct{})
+	m.hcStop = stop
+	go m.healthLoop(stop)
+}
+
+// stopHealthLoopLocked останавливает health-горутину (идемпотентно). Требует mu.
+func (m *Manager) stopHealthLoopLocked() {
+	if m.hcStop != nil {
+		close(m.hcStop)
+		m.hcStop = nil
+	}
+}
+
+func (m *Manager) healthLoop(stop <-chan struct{}) {
+	ticker := time.NewTicker(healthInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-ticker.C:
+			m.healthCheckNow(context.Background())
+		}
+	}
+}
+
 // statusLocked собирает ответ status-full из зеркала state и (если есть) счётчиков
 // активного туннеля. Требует удержания mu.
 func (m *Manager) statusLocked() map[string]any {
 	res := map[string]any{
-		"phase":         string(m.st.Phase),
-		"state":         string(m.st.Phase),
-		"utun":          m.st.Utun,
-		"serverHost":    m.st.ServerIP,
-		"killSwitch":    m.st.AnchorLoaded && m.st.PFToken != "",
-		"dnsOverridden": phaseRank(m.st.Phase) >= phaseRank(vpnmut.PhaseDNSSet),
-		"strict":        m.st.StrictKillSwitch,
+		"phase":              string(m.st.Phase),
+		"state":              string(m.st.Phase),
+		"utun":               m.st.Utun,
+		"serverHost":         m.st.ServerIP,
+		"killSwitch":         m.st.AnchorLoaded && m.st.PFToken != "",
+		"dnsOverridden":      phaseRank(m.st.Phase) >= phaseRank(vpnmut.PhaseDNSSet),
+		"strict":             m.st.StrictKillSwitch,
+		"pingMs":             m.pingMs,
+		"lastCheckUnix":      m.lastCheckUnix,
+		"connectedSinceUnix": m.connectedSinceUnix,
 	}
 	if m.tun != nil {
 		if s, err := m.tun.Stats(); err == nil {
