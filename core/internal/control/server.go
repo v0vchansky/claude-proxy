@@ -10,14 +10,18 @@ import (
 	"path/filepath"
 
 	"github.com/v0vchansky/claude-proxy/core/internal/profile"
+	"github.com/v0vchansky/claude-proxy/core/internal/provision"
 )
 
 // request — входящая команда (JSON Lines).
 type request struct {
-	ID      int             `json:"id"`
-	Cmd     string          `json:"cmd"`
-	Profile *profile.Profile `json:"profile,omitempty"`
-	PrivKey string          `json:"privateKey,omitempty"`
+	ID              int                  `json:"id"`
+	Cmd             string               `json:"cmd"`
+	Profile         *profile.Profile     `json:"profile,omitempty"`
+	PrivKey         string               `json:"privateKey,omitempty"`
+	SSH             *provision.SSHConfig `json:"ssh,omitempty"`
+	Provision       *provision.Params    `json:"provision,omitempty"`
+	ClientPublicKey string               `json:"clientPublicKey,omitempty"`
 }
 
 // response — ответ на команду.
@@ -129,6 +133,22 @@ func (s *Server) dispatch(line []byte) response {
 		return result(req.ID, st, err)
 	case "healthcheck":
 		return response{ID: req.ID, OK: true, Result: s.d.Healthcheck()}
+	case "provision":
+		if req.SSH == nil {
+			return response{ID: req.ID, OK: false, Error: "provision: отсутствует ssh"}
+		}
+		if req.ClientPublicKey == "" {
+			return response{ID: req.ID, OK: false, Error: "provision: отсутствует clientPublicKey"}
+		}
+		params := provision.Params{}
+		if req.Provision != nil {
+			params = *req.Provision
+		}
+		res, err := s.d.Provision(*req.SSH, params, req.ClientPublicKey)
+		if err != nil {
+			return response{ID: req.ID, OK: false, Error: err.Error(), Result: res}
+		}
+		return response{ID: req.ID, OK: true, Result: res}
 	default:
 		return response{ID: req.ID, OK: false, Error: "неизвестная команда: " + req.Cmd}
 	}

@@ -10,6 +10,7 @@ import (
 	"github.com/v0vchansky/claude-proxy/core/internal/health"
 	"github.com/v0vchansky/claude-proxy/core/internal/logbuf"
 	"github.com/v0vchansky/claude-proxy/core/internal/profile"
+	"github.com/v0vchansky/claude-proxy/core/internal/provision"
 	"github.com/v0vchansky/claude-proxy/core/internal/proxy"
 	"github.com/v0vchansky/claude-proxy/core/internal/tunnel"
 )
@@ -137,6 +138,22 @@ func (d *Daemon) Disconnect() State {
 	d.mu.Unlock()
 	d.log.Logf("Disconnected")
 	return d.Status()
+}
+
+// Provision разворачивает/усыновляет сервер по SSH. Не трогает текущий туннель.
+// Возвращает результат с профилем и собранным логом шагов.
+func (d *Daemon) Provision(ssh provision.SSHConfig, params provision.Params, clientPub string) (provision.Result, error) {
+	d.log.Logf("Provision: %s", ssh.Host)
+	var steps []string
+	res, err := provision.Provision(ssh, params, clientPub, func(s string) {
+		steps = append(steps, s)
+		d.log.Logf("provision: %s", s)
+	})
+	res.Log = steps
+	if err != nil {
+		d.log.Logf("Provision error: %v", err)
+	}
+	return res, err
 }
 
 // Healthcheck выполняет проверку сейчас и обновляет состояние.
