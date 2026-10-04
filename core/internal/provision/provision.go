@@ -64,6 +64,7 @@ type Result struct {
 	H3               uint32   `json:"h3"`
 	H4               uint32   `json:"h4"`
 	Adopted          bool     `json:"adopted"`
+	RebootRequired   bool     `json:"rebootRequired"`
 	Log              []string `json:"log"`
 }
 
@@ -133,6 +134,9 @@ func Provision(sshCfg SSHConfig, params Params, clientPublicKey string, logf fun
 		logf("Сервер уже настроен — добавлен peer, параметры прочитаны с сервера")
 	} else {
 		logf("AmneziaWG установлен и настроен с нуля")
+	}
+	if res.RebootRequired {
+		logf("Сервер перезагружается для активации модуля — подключение будет готово через ~1 минуту")
 	}
 	logf("Готово")
 	return res, nil
@@ -206,11 +210,29 @@ func run(client *ssh.Client, script string) (string, error) {
 	var buf bytes.Buffer
 	sess.Stdout = &buf
 	sess.Stderr = &buf
+
+	// Keepalive на время выполнения: установка пакета/сборка DKMS идут долго и молча
+	// (вывод apt уходит в /dev/null), а канал без трафика рвётся idle-таймаутом NAT/sshd.
+	stop := make(chan struct{})
+	go func() {
+		t := time.NewTicker(15 * time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-t.C:
+				_, _, _ = client.SendRequest("keepalive@openssh.com", true, nil)
+			}
+		}
+	}()
+
 	// Передаём скрипт как base64 одной командой: надёжнее, чем piped stdin в `bash -s`
 	// (у некоторых sshd/shell конфигураций stdin до удалённого bash не доходит).
 	enc := base64.StdEncoding.EncodeToString([]byte(script))
 	cmd := "echo " + enc + " | base64 --decode | bash"
 	err = sess.Run(cmd)
+	close(stop)
 	return buf.String(), err
 }
 
@@ -229,6 +251,7 @@ func parseResult(out string) (Result, error) {
 	if r.ServerPublicKey == "" {
 		return Result{}, fmt.Errorf("не удалось получить публичный ключ сервера")
 	}
+	r.RebootRequired = get("NEEDS_REBOOT") == "1"
 	r.ServerVpnAddress = stripMask(get("SERVER_VPN"))
 	r.Port = atoiDef(get("AWG_PORT"), 51820)
 	r.Jc = atoiDef(get("JC"), 0)

@@ -27,6 +27,7 @@ func TestParseResult(t *testing.T) {
 	out := strings.Join([]string{
 		"LOG:step",
 		"MODE=adopt",
+		"NEEDS_REBOOT=0",
 		"SERVER_PUBLIC_KEY=WyhFpvvdzC2OBhpbcRAMzVZXsyWgToZ/4vtVkgBo4F4=",
 		"AWG_PORT=51820",
 		"SERVER_VPN=10.77.0.1",
@@ -47,6 +48,20 @@ func TestParseResult(t *testing.T) {
 	}
 	if r.ServerVpnAddress != "10.77.0.1" {
 		t.Errorf("servervpn=%q", r.ServerVpnAddress)
+	}
+	if r.RebootRequired {
+		t.Error("RebootRequired должно быть false при NEEDS_REBOOT=0")
+	}
+}
+
+func TestParseResultRebootRequired(t *testing.T) {
+	out := "NEEDS_REBOOT=1\nSERVER_PUBLIC_KEY=abc\nAWG_PORT=51820\nPROVISION_OK\n"
+	r, err := parseResult(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !r.RebootRequired {
+		t.Error("ожидался RebootRequired=true при NEEDS_REBOOT=1")
 	}
 }
 
@@ -74,6 +89,7 @@ func TestBuildScriptInjectsParamsAndMarkers(t *testing.T) {
 		"JC=5", "S1=64", "S2=128", "H1=1000001",
 		"MODE=", "PROVISION_OK", "S3 = 0", "S4 = 0",
 		"add-apt-repository -y ppa:amnezia/ppa",
+		"NEEDS_REBOOT=", "modprobe amneziawg", "systemctl reboot",
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("скрипт не содержит %q", want)
