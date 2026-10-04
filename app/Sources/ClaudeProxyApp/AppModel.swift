@@ -32,6 +32,7 @@ final class AppModel: ObservableObject {
     private let client: ControlClient
     private let work = DispatchQueue(label: "claudeproxy.control")
     private var statusTimer: Timer?
+    private var provisionTimer: Timer?
     private var privateKeyB64: String = ""
 
     init() {
@@ -195,6 +196,46 @@ final class AppModel: ObservableObject {
 
     // MARK: - Provisioning
 
+    /// Живой прогресс: пока идёт provision, опрашиваем журнал ядра (команда logs
+    /// обрабатывается параллельно с длинным provision) и показываем новые шаги
+    /// «provision: …» по мере их появления. baseline отсекает строки прошлых запусков.
+    private func startProvisionPolling() {
+        let client = self.client
+        work.async { [weak self] in
+            let baseline = ((try? client.logs()) ?? []).filter { $0.contains("provision:") }.count
+            DispatchQueue.main.async {
+                guard let self, self.provisionBusy else { return }
+                self.provisionTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+                    Task { @MainActor in self?.pollProvisionLog(baseline: baseline) }
+                }
+            }
+        }
+    }
+
+    private func pollProvisionLog(baseline: Int) {
+        guard provisionBusy else { stopProvisionPolling(); return }
+        let client = self.client
+        work.async { [weak self] in
+            let prov = ((try? client.logs()) ?? []).filter { $0.contains("provision:") }
+            let fresh = prov.count > baseline ? Array(prov.suffix(prov.count - baseline)) : []
+            let steps = fresh.map { line -> String in
+                if let r = line.range(of: "provision:") {
+                    return String(line[r.upperBound...]).trimmingCharacters(in: .whitespaces)
+                }
+                return line
+            }
+            DispatchQueue.main.async {
+                guard let self, self.provisionBusy else { return }
+                self.provisionLog = ["Подключаемся к серверу…"] + steps
+            }
+        }
+    }
+
+    private func stopProvisionPolling() {
+        provisionTimer?.invalidate()
+        provisionTimer = nil
+    }
+
     /// Разворачивает новый сервер по SSH и, по успеху, добавляет профиль и делает его активным.
     /// Секреты (пароль/ключ) живут только в переданном `ssh` на время вызова — никуда не сохраняются.
     func provision(displayName: String,
@@ -206,6 +247,7 @@ final class AppModel: ObservableObject {
         provisionError = ""
         provisionedID = ""
         provisionLog = ["Подключаемся к \(ssh.host)…"]
+        startProvisionPolling()
 
         let client = self.client
         let pub = self.publicKey
@@ -238,14 +280,14 @@ final class AppModel: ObservableObject {
                     self.activeID = self.store.activeID
                     self.provisionLog = res.log
                     self.provisionedID = profile.id
-                    self.provisionBusy = false
+                    self.stopProvisionPolling(); self.provisionBusy = false
                 }
             } catch let e as ControlClient.ProvisionFailure {
                 DispatchQueue.main.async {
                     guard let self else { return }
                     self.provisionLog = e.log
                     self.provisionError = e.message
-                    self.provisionBusy = false
+                    self.stopProvisionPolling(); self.provisionBusy = false
                 }
             } catch {
                 DispatchQueue.main.async {
@@ -253,7 +295,7 @@ final class AppModel: ObservableObject {
                     let msg = (error as? ControlClient.ControlError)?.errorDescription
                         ?? error.localizedDescription
                     self.provisionError = msg
-                    self.provisionBusy = false
+                    self.stopProvisionPolling(); self.provisionBusy = false
                 }
             }
         }

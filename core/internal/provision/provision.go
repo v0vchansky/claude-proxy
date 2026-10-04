@@ -6,13 +6,16 @@
 package provision
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/base64"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -110,12 +113,9 @@ func Provision(sshCfg SSHConfig, params Params, clientPublicKey string, logf fun
 
 	script := buildScript(params, clientPublicKey)
 	logf("Запуск настройки на сервере…")
-	out, runErr := run(client, script)
-	for _, line := range strings.Split(out, "\n") {
-		if s, ok := strings.CutPrefix(strings.TrimSpace(line), "LOG:"); ok {
-			logf(strings.TrimSpace(s))
-		}
-	}
+	// Шаги (LOG:) эмитятся ВЖИВУЮ по мере выполнения скрипта через logf — чтобы UI
+	// показывал прогресс долгой установки, а не замирал до конца.
+	out, runErr := run(client, script, logf)
 	if runErr != nil {
 		return Result{}, fmt.Errorf("%v\n%s", runErr, tail(out, 15))
 	}
@@ -200,19 +200,30 @@ func dial(cfg SSHConfig) (*ssh.Client, error) {
 	return client, nil
 }
 
-func run(client *ssh.Client, script string) (string, error) {
+// run выполняет скрипт на сервере, стримя вывод построчно. Строки вида "LOG:…"
+// из stdout передаются в onLog ВЖИВУЮ (для прогресса в UI). Весь вывод (stdout+stderr)
+// также накапливается и возвращается для финального разбора маркеров результата.
+func run(client *ssh.Client, script string, onLog func(string)) (string, error) {
 	sess, err := client.NewSession()
 	if err != nil {
 		return "", fmt.Errorf("SSH сессия: %w", err)
 	}
 	defer sess.Close()
 
-	var buf bytes.Buffer
-	sess.Stdout = &buf
-	sess.Stderr = &buf
+	stdoutPipe, err := sess.StdoutPipe()
+	if err != nil {
+		return "", fmt.Errorf("stdout pipe: %w", err)
+	}
+	stderrPipe, err := sess.StderrPipe()
+	if err != nil {
+		return "", fmt.Errorf("stderr pipe: %w", err)
+	}
 
-	// Keepalive на время выполнения: установка пакета/сборка DKMS идут долго и молча
-	// (вывод apt уходит в /dev/null), а канал без трафика рвётся idle-таймаутом NAT/sshd.
+	var buf bytes.Buffer
+	var bufMu sync.Mutex
+
+	// Keepalive на время выполнения: установка пакета/сборка DKMS идут долго и молча,
+	// а канал без трафика рвётся idle-таймаутом NAT/sshd.
 	stop := make(chan struct{})
 	go func() {
 		t := time.NewTicker(15 * time.Second)
@@ -227,13 +238,44 @@ func run(client *ssh.Client, script string) (string, error) {
 		}
 	}()
 
-	// Передаём скрипт как base64 одной командой: надёжнее, чем piped stdin в `bash -s`
-	// (у некоторых sshd/shell конфигураций stdin до удалённого bash не доходит).
+	// Передаём скрипт как base64 одной командой: надёжнее, чем piped stdin в `bash -s`.
 	enc := base64.StdEncoding.EncodeToString([]byte(script))
 	cmd := "echo " + enc + " | base64 --decode | bash"
-	err = sess.Run(cmd)
+	if err := sess.Start(cmd); err != nil {
+		close(stop)
+		return "", fmt.Errorf("запуск команды: %w", err)
+	}
+
+	scan := func(r io.Reader, live bool, wg *sync.WaitGroup) {
+		defer wg.Done()
+		sc := bufio.NewScanner(r)
+		sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+		for sc.Scan() {
+			line := sc.Text()
+			bufMu.Lock()
+			buf.WriteString(line)
+			buf.WriteByte('\n')
+			bufMu.Unlock()
+			if live && onLog != nil {
+				if s, ok := strings.CutPrefix(strings.TrimSpace(line), "LOG:"); ok {
+					onLog(strings.TrimSpace(s))
+				}
+			}
+		}
+	}
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go scan(stdoutPipe, true, &wg)
+	go scan(stderrPipe, false, &wg)
+
+	waitErr := sess.Wait()
+	wg.Wait()
 	close(stop)
-	return buf.String(), err
+
+	bufMu.Lock()
+	out := buf.String()
+	bufMu.Unlock()
+	return out, waitErr
 }
 
 func parseResult(out string) (Result, error) {
