@@ -22,5 +22,14 @@ struct ClaudeProxyApp: App {
             Image(systemName: model.iconName)
         }
         .menuBarExtraStyle(.window)
+
+        // Экран серверов — отдельное окно (а не sheet поверх popover),
+        // чтобы его закрытие/Done возвращали в обычное состояние, а клик по
+        // иконке всегда показывал popover.
+        Window("Servers", id: "servers") {
+            ServersView().environmentObject(model)
+        }
+        .windowResizability(.contentSize)
+        .defaultSize(width: 700, height: 600)
     }
 }

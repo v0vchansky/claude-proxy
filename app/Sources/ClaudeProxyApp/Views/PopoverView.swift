@@ -2,7 +2,7 @@ import SwiftUI
 
 struct PopoverView: View {
     @EnvironmentObject var model: AppModel
-    @State private var showServers = false
+    @Environment(\.openWindow) private var openWindow
     @State private var copiedKey = false
     @State private var copiedCmd = false
     @State private var copiedDiag = false
@@ -26,9 +26,6 @@ struct PopoverView: View {
         }
         .padding(14)
         .frame(width: 300)
-        .sheet(isPresented: $showServers) {
-            ServersView().environmentObject(model)
-        }
     }
 
     private var header: some View {
@@ -130,7 +127,8 @@ struct PopoverView: View {
 
             HStack(spacing: 8) {
                 Button {
-                    showServers = true
+                    NSApp.activate(ignoringOtherApps: true)
+                    openWindow(id: "servers")
                 } label: {
                     Text("Servers…").frame(maxWidth: .infinity)
                 }
