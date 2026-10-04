@@ -24,8 +24,9 @@ final class ProfileStore {
         }
     }
 
-    var active: ServerProfile {
-        profiles.first(where: { $0.id == activeID }) ?? profiles[0]
+    /// Активный профиль или nil, если серверов нет (можно удалить все).
+    var active: ServerProfile? {
+        profiles.first(where: { $0.id == activeID })
     }
 
     func setActive(_ id: String) {
@@ -45,11 +46,10 @@ final class ProfileStore {
 
     func delete(_ id: String) {
         profiles.removeAll { $0.id == id }
-        if profiles.isEmpty {
-            profiles = [.defaultHostkey]
-        }
+        // Разрешаем удалить все серверы — список может стать пустым (Proxy тогда
+        // недоступен, пока не добавишь сервер). Дефолт больше не навязываем.
         if !profiles.contains(where: { $0.id == activeID }) {
-            activeID = profiles[0].id
+            activeID = profiles.first?.id ?? ""
         }
         save()
     }

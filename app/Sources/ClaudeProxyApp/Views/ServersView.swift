@@ -21,14 +21,14 @@ struct ServersView: View {
         .frame(minWidth: 700, minHeight: 560)
         .onAppear {
             selectedID = model.activeID
-            draft = model.active
+            draft = model.active ?? .defaultHostkey
             isNew = false
         }
         .sheet(isPresented: $showProvision) {
             ProvisionView { newID in
                 // По успеху — выделяем новый профиль в списке.
                 selectedID = newID
-                draft = model.profiles.first(where: { $0.id == newID }) ?? model.active
+                draft = model.profiles.first(where: { $0.id == newID }) ?? model.active ?? .defaultHostkey
                 isNew = false
             }
             .environmentObject(model)
@@ -147,7 +147,7 @@ struct ServersView: View {
                 .disabled(isNew || model.core.state == .disconnected)
             Spacer()
             Button(role: .destructive) { delete() } label: { Text("Delete") }
-                .disabled(isNew || model.profiles.count <= 1)
+                .disabled(isNew)
         }
         .padding(12)
     }
@@ -210,7 +210,7 @@ struct ServersView: View {
     private func delete() {
         model.deleteProfile(draft.id)
         selectedID = model.activeID
-        draft = model.active
+        draft = model.active ?? .defaultHostkey
     }
 }
 

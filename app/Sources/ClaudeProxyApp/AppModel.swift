@@ -42,7 +42,7 @@ final class AppModel: ObservableObject {
         self.activeID = store.activeID
     }
 
-    var active: ServerProfile { store.active }
+    var active: ServerProfile? { store.active }
 
     var claudeCommand: String {
         let addr = core.localProxy.isEmpty ? "127.0.0.1:8118" : core.localProxy
@@ -100,7 +100,7 @@ final class AppModel: ObservableObject {
             guard ok else { return }
 
             // 3. Автоподключение или просто начальный статус.
-            if shouldAuto, !priv.isEmpty {
+            if shouldAuto, !priv.isEmpty, let p {
                 let result = Result { try client.connect(p, privateKey: priv) }
                 DispatchQueue.main.async { self?.apply(result) }
             } else if let st = try? client.status() {
@@ -118,14 +118,21 @@ final class AppModel: ObservableObject {
     // MARK: - Actions
 
     func toggle(on: Bool) {
+        if on, active == nil {
+            uiError = "Нет активного сервера — добавьте сервер в Servers…"
+            return
+        }
         busy = true
         let client = self.client
         let p = self.active
         let key = self.privateKeyB64
         work.async { [weak self] in
-            let result: Result<CoreState, Error> = on
-                ? Result { try client.connect(p, privateKey: key) }
-                : Result { try client.disconnect() }
+            let result: Result<CoreState, Error>
+            if on, let p {
+                result = Result { try client.connect(p, privateKey: key) }
+            } else {
+                result = Result { try client.disconnect() }
+            }
             DispatchQueue.main.async { self?.apply(result) }
         }
     }
@@ -140,6 +147,7 @@ final class AppModel: ObservableObject {
         let p = self.active
         let key = self.privateKeyB64
         work.async { [weak self] in
+            guard let p else { DispatchQueue.main.async { self?.busy = false }; return }
             let result = Result { try client.switchServer(p, privateKey: key) }
             DispatchQueue.main.async { self?.apply(result) }
         }

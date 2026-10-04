@@ -46,7 +46,7 @@ struct PopoverView: View {
             ))
             .labelsHidden()
             .toggleStyle(.switch)
-            .disabled(model.busy || !model.coreAvailable)
+            .disabled(model.busy || !model.coreAvailable || model.active == nil)
         }
     }
 
@@ -69,19 +69,26 @@ struct PopoverView: View {
     private var serverBlock: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text("Server").font(.caption).foregroundStyle(.secondary)
-            Picker("", selection: Binding(
-                get: { model.activeID },
-                set: { model.switchServer($0) }
-            )) {
-                ForEach(model.profiles) { p in
-                    Text(p.displayName).tag(p.id)
+            if model.profiles.isEmpty {
+                Text("Нет серверов — добавьте в Servers…")
+                    .font(.caption).foregroundStyle(.secondary)
+            } else {
+                Picker("", selection: Binding(
+                    get: { model.activeID },
+                    set: { model.switchServer($0) }
+                )) {
+                    ForEach(model.profiles) { p in
+                        Text(p.displayName).tag(p.id)
+                    }
+                }
+                .labelsHidden()
+                .disabled(model.busy)
+
+                if let a = model.active {
+                    Text("\(a.host):\(a.port)")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
             }
-            .labelsHidden()
-            .disabled(model.busy)
-
-            Text("\(model.active.host):\(model.active.port)")
-                .font(.caption).foregroundStyle(.secondary)
         }
     }
 
