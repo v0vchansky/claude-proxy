@@ -33,12 +33,12 @@ type Daemon struct {
 
 	opMu sync.Mutex // сериализует длинные операции (connect/disconnect/switch)
 
-	mu    sync.Mutex // защищает поля ниже
-	st    State
-	tun   *tunnel.Tunnel
-	prx   *proxy.Proxy
-	prof  profile.Profile
-	priv  string // приватный ключ клиента в памяти; не логируется, не сохраняется
+	mu   sync.Mutex // защищает поля ниже
+	st   State
+	tun  *tunnel.Tunnel
+	prx  *proxy.Proxy
+	prof profile.Profile
+	priv string // приватный ключ клиента в памяти; не логируется, не сохраняется
 
 	healthCancel context.CancelFunc
 }

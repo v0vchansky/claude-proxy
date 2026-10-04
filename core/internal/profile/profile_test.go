@@ -33,11 +33,11 @@ func TestValidateOK(t *testing.T) {
 
 func TestValidateErrors(t *testing.T) {
 	cases := map[string]func(*Profile){
-		"пустой host":          func(p *Profile) { p.Host = "" },
-		"порт вне диапазона":   func(p *Profile) { p.Port = 70000 },
-		"битый serverPublicKey": func(p *Profile) { p.ServerPublicKey = "не ключ" },
+		"пустой host":            func(p *Profile) { p.Host = "" },
+		"порт вне диапазона":     func(p *Profile) { p.Port = 70000 },
+		"битый serverPublicKey":  func(p *Profile) { p.ServerPublicKey = "не ключ" },
 		"битый clientVpnAddress": func(p *Profile) { p.ClientVpnAddress = "999.1.1.1" },
-		"битый dns":            func(p *Profile) { p.DNS = []string{"nope"} },
+		"битый dns":              func(p *Profile) { p.DNS = []string{"nope"} },
 	}
 	for name, mutate := range cases {
 		p := sampleProfile()

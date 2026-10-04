@@ -19,14 +19,14 @@ type DialFunc func(ctx context.Context, network, address string) (net.Conn, erro
 
 // Proxy — запущенный локальный прокси.
 type Proxy struct {
-	ln       net.Listener
-	dial     DialFunc
-	logf     func(format string, args ...any)
-	server   *http.Server
-	wg       sync.WaitGroup
-	mu       sync.Mutex
-	conns    map[net.Conn]struct{}
-	closed   bool
+	ln     net.Listener
+	dial   DialFunc
+	logf   func(format string, args ...any)
+	server *http.Server
+	wg     sync.WaitGroup
+	mu     sync.Mutex
+	conns  map[net.Conn]struct{}
+	closed bool
 }
 
 // Start поднимает прокси на addr (ожидается 127.0.0.1:port). Возвращает Proxy

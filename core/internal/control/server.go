@@ -1,14 +1,9 @@
 package control
 
 import (
-	"bufio"
 	"encoding/json"
-	"errors"
-	"io"
-	"net"
-	"os"
-	"path/filepath"
 
+	"github.com/v0vchansky/claude-proxy/core/internal/ipc"
 	"github.com/v0vchansky/claude-proxy/core/internal/profile"
 	"github.com/v0vchansky/claude-proxy/core/internal/provision"
 )
@@ -26,77 +21,50 @@ type request struct {
 
 // response — ответ на команду.
 type response struct {
-	ID     int `json:"id"`
-	OK     bool `json:"ok"`
-	Result any  `json:"result,omitempty"`
+	ID     int    `json:"id"`
+	OK     bool   `json:"ok"`
+	Result any    `json:"result,omitempty"`
 	Error  string `json:"error,omitempty"`
 }
 
-// Server слушает unix-сокет и обслуживает команды для Daemon.
+// Server обслуживает proxy-протокол поверх транспорта ipc. Транспорт даёт сокет,
+// accept-loop и построчное чтение/запись; Server предоставляет ему Handler с
+// JSON-диспетчем команд proxy-режима (ping/status/connect/disconnect/switch/
+// healthcheck/logs/provision). Внешнее поведение протокола неизменно.
 type Server struct {
-	d        *Daemon
-	sockPath string
-	ln       net.Listener
+	d   *Daemon
+	ipc *ipc.Server
 }
 
-// NewServer готовит сокет-сервер на sockPath.
+// NewServer готовит сокет-сервер proxy-режима на sockPath.
 func NewServer(d *Daemon, sockPath string) (*Server, error) {
-	if err := os.MkdirAll(filepath.Dir(sockPath), 0o700); err != nil {
-		return nil, err
-	}
-	// Снять возможный stale-сокет от прошлого запуска.
-	_ = os.Remove(sockPath)
-	ln, err := net.Listen("unix", sockPath)
+	s := &Server{d: d}
+	ipcSrv, err := ipc.NewServer(sockPath, s.handle)
 	if err != nil {
 		return nil, err
 	}
-	if err := os.Chmod(sockPath, 0o600); err != nil {
-		_ = ln.Close()
-		return nil, err
-	}
-	return &Server{d: d, sockPath: sockPath, ln: ln}, nil
+	s.ipc = ipcSrv
+	return s, nil
 }
 
-// Serve принимает соединения до закрытия listener.
-func (s *Server) Serve() error {
-	for {
-		conn, err := s.ln.Accept()
-		if err != nil {
-			if errors.Is(err, net.ErrClosed) {
-				return nil
-			}
-			return err
-		}
-		go s.handleConn(conn)
-	}
-}
+// Serve принимает соединения до закрытия.
+func (s *Server) Serve() error { return s.ipc.Serve() }
 
 // Close останавливает сервер и удаляет сокет.
-func (s *Server) Close() error {
-	err := s.ln.Close()
-	_ = os.Remove(s.sockPath)
-	return err
-}
+func (s *Server) Close() error { return s.ipc.Close() }
 
-func (s *Server) handleConn(conn net.Conn) {
-	defer conn.Close()
-	r := bufio.NewReader(conn)
-	enc := json.NewEncoder(conn)
-	for {
-		line, err := r.ReadBytes('\n')
-		if len(line) > 0 {
-			resp := s.dispatch(line)
-			if werr := enc.Encode(resp); werr != nil {
-				return
-			}
-		}
-		if err != nil {
-			if err != io.EOF {
-				// битая строка/разрыв — закрываем соединение
-			}
-			return
-		}
+// handle — Handler транспорта: разбирает строку, диспетчит и кодирует ответ.
+// Транспорт добавит завершающий `\n` сам, поэтому здесь json.Marshal без него —
+// байт-в-байт тот же вывод, что давал прежний json.Encoder.Encode.
+func (s *Server) handle(line []byte) []byte {
+	resp := s.dispatch(line)
+	b, err := json.Marshal(resp)
+	if err != nil {
+		// Практически недостижимо (response состоит из сериализуемых полей),
+		// но ответ всё равно должен уйти валидным JSON.
+		b, _ = json.Marshal(response{ID: resp.ID, OK: false, Error: "internal: " + err.Error()})
 	}
+	return b
 }
 
 func (s *Server) dispatch(line []byte) response {

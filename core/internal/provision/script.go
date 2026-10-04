@@ -8,11 +8,12 @@ import "fmt"
 // к телу не применяется, иначе '%' в них ломается. Скрипт идемпотентен.
 //
 // Соглашения вывода:
-//   LOG:<текст>              — шаг для UI
-//   MODE=fresh|adopt         — режим
-//   SERVER_PUBLIC_KEY=...     — публичный ключ сервера
-//   AWG_PORT=, SERVER_VPN=, JC=, JMIN=, JMAX=, S1=, S2=, S3=, S4=, H1..H4=
-//   PROVISION_OK             — успешное завершение
+//
+//	LOG:<текст>              — шаг для UI
+//	MODE=fresh|adopt         — режим
+//	SERVER_PUBLIC_KEY=...     — публичный ключ сервера
+//	AWG_PORT=, SERVER_VPN=, JC=, JMIN=, JMAX=, S1=, S2=, S3=, S4=, H1..H4=
+//	PROVISION_OK             — успешное завершение
 func buildScript(p Params, clientPub string) string {
 	header := fmt.Sprintf(`set -euo pipefail
 
