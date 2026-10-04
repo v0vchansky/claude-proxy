@@ -97,41 +97,61 @@ struct PopoverView: View {
 
     private var actions: some View {
         VStack(spacing: 8) {
+            // Акцентное действие — проверить соединение (как в макете §4).
             Button {
                 model.refresh()
             } label: {
-                Text("Обновить").frame(maxWidth: .infinity)
+                Label("Обновить", systemImage: "arrow.clockwise").frame(maxWidth: .infinity)
             }
+            .buttonStyle(.borderedProminent)
             .disabled(model.busy || !model.coreAvailable)
 
-            HStack(spacing: 8) {
-                Button(copiedCmd ? "Copied ✓" : "Copy Claude command") {
-                    model.copyClaudeCommand(); flash($copiedCmd)
-                }
-                .frame(maxWidth: .infinity)
+            // Скопировать команду запуска Claude Code.
+            Button {
+                model.copyClaudeCommand(); flash($copiedCmd)
+            } label: {
+                Label(copiedCmd ? "Скопировано" : "Copy Claude command",
+                      systemImage: copiedCmd ? "checkmark" : "doc.on.doc")
+                    .frame(maxWidth: .infinity)
             }
 
             HStack(spacing: 8) {
-                Button(copiedKey ? "Copied ✓" : "Copy Public Key") {
+                Button {
                     model.copyPublicKey(); flash($copiedKey)
+                } label: {
+                    Text(copiedKey ? "Скопировано" : "Copy Public Key").frame(maxWidth: .infinity)
                 }
-                Button(copiedDiag ? "Copied ✓" : "Copy diagnostics") {
+                Button {
                     model.copyDiagnostics(); flash($copiedDiag)
+                } label: {
+                    Text(copiedDiag ? "Скопировано" : "Copy diagnostics").frame(maxWidth: .infinity)
                 }
             }
-            .font(.caption)
 
-            HStack {
-                Button("Servers…") { showServers = true }
-                Spacer()
-                Button("Quit") { NSApplication.shared.terminate(nil) }
+            HStack(spacing: 8) {
+                Button {
+                    showServers = true
+                } label: {
+                    Text("Servers…").frame(maxWidth: .infinity)
+                }
+                Button {
+                    NSApplication.shared.terminate(nil)
+                } label: {
+                    Text("Quit").frame(maxWidth: .infinity)
+                }
             }
-            .font(.caption)
 
-            Divider()
-            Toggle("Launch at login", isOn: $model.launchAtLogin).font(.caption)
-            Toggle("Enable proxy on launch", isOn: $model.enableOnLaunch).font(.caption)
+            Divider().padding(.vertical, 2)
+
+            VStack(alignment: .leading, spacing: 6) {
+                Toggle("Launch at login", isOn: $model.launchAtLogin)
+                Toggle("Enable proxy on launch", isOn: $model.enableOnLaunch)
+            }
+            .toggleStyle(.checkbox)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .buttonStyle(.bordered)
+        .controlSize(.regular)
     }
 
     private var lastErrorBlock: some View {
