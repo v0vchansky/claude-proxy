@@ -64,6 +64,7 @@ struct PopoverView: View {
                 Text("Ping: \(model.pingText)").font(.caption).foregroundStyle(.secondary)
                 Text("Checked: \(model.lastCheckText)").font(.caption).foregroundStyle(.secondary)
                 Text("Connected for: \(model.uptimeText)").font(.caption).foregroundStyle(.secondary)
+                Text("Traffic: ↓ \(model.rxText)  ↑ \(model.txText)").font(.caption).foregroundStyle(.secondary)
             }
         }
     }

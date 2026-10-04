@@ -223,6 +223,16 @@ final class AppModel: ObservableObject {
 
     var pingText: String { core.pingMs >= 0 ? "\(core.pingMs) ms" : "—" }
 
+    var rxText: String { Self.humanBytes(core.rxBytes) }
+    var txText: String { Self.humanBytes(core.txBytes) }
+
+    private static func humanBytes(_ n: Int64) -> String {
+        let units = ["B", "KB", "MB", "GB"]
+        var v = Double(n), i = 0
+        while v >= 1024, i < units.count - 1 { v /= 1024; i += 1 }
+        return i == 0 ? "\(n) B" : String(format: "%.1f %@", v, units[i])
+    }
+
     /// Иконка menu bar по состоянию (SF Symbol).
     var iconName: String {
         switch core.state {
