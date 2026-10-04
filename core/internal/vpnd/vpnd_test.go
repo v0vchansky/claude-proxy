@@ -18,7 +18,7 @@ func decode(t *testing.T, raw []byte) response {
 }
 
 func TestPingReturnsModeAndVersion(t *testing.T) {
-	h := NewHandler("1.2.3", logbuf.New(10))
+	h := NewHandler("1.2.3", logbuf.New(10), nil)
 	raw := h.Handle([]byte(`{"id":7,"cmd":"ping"}`))
 
 	// Ответ не должен содержать завершающего \n — его добавляет транспорт.
@@ -45,7 +45,7 @@ func TestPingReturnsModeAndVersion(t *testing.T) {
 func TestLogsReturnsLines(t *testing.T) {
 	log := logbuf.New(10)
 	log.Logf("событие")
-	h := NewHandler("1.0.0", log)
+	h := NewHandler("1.0.0", log, nil)
 
 	r := decode(t, h.Handle([]byte(`{"id":1,"cmd":"logs"}`)))
 	if !r.OK {
@@ -65,7 +65,7 @@ func TestLogsReturnsLines(t *testing.T) {
 }
 
 func TestLogsEmptyWithoutBuffer(t *testing.T) {
-	h := NewHandler("1.0.0", nil)
+	h := NewHandler("1.0.0", nil, nil)
 	r := decode(t, h.Handle([]byte(`{"id":2,"cmd":"logs"}`)))
 	if !r.OK {
 		t.Fatalf("logs ok=false: %q", r.Error)
@@ -80,12 +80,14 @@ func TestLogsEmptyWithoutBuffer(t *testing.T) {
 	}
 }
 
-func TestUnimplementedCommands(t *testing.T) {
-	h := NewHandler("1.0.0", nil)
+// TestCommandsWithoutManager: команды полного VPN без оркестратора отвечают
+// ошибкой (а не паникуют).
+func TestCommandsWithoutManager(t *testing.T) {
+	h := NewHandler("1.0.0", nil, nil)
 	for _, cmd := range []string{"connect-full", "disconnect-full", "status-full"} {
 		r := decode(t, h.Handle([]byte(`{"id":3,"cmd":"`+cmd+`"}`)))
 		if r.OK {
-			t.Fatalf("%s: ожидалось ok=false", cmd)
+			t.Fatalf("%s без mgr: ожидалось ok=false", cmd)
 		}
 		if r.ID != 3 {
 			t.Fatalf("%s: id=%d, ожидалось 3", cmd, r.ID)
@@ -96,8 +98,23 @@ func TestUnimplementedCommands(t *testing.T) {
 	}
 }
 
+func TestConnectFullRequiresProfileAndKey(t *testing.T) {
+	h := NewHandler("1.0.0", nil, newTestManager(t, nil))
+
+	// Нет profile.
+	r := decode(t, h.Handle([]byte(`{"id":4,"cmd":"connect-full","privateKey":"k"}`)))
+	if r.OK || r.Error == "" {
+		t.Fatalf("connect-full без profile: ожидалась ошибка, got %+v", r)
+	}
+	// Нет privateKey.
+	r = decode(t, h.Handle([]byte(`{"id":5,"cmd":"connect-full","profile":{"host":"1.2.3.4","port":51820}}`)))
+	if r.OK || r.Error == "" {
+		t.Fatalf("connect-full без privateKey: ожидалась ошибка, got %+v", r)
+	}
+}
+
 func TestUnknownCommand(t *testing.T) {
-	h := NewHandler("1.0.0", nil)
+	h := NewHandler("1.0.0", nil, nil)
 	r := decode(t, h.Handle([]byte(`{"id":9,"cmd":"frobnicate"}`)))
 	if r.OK {
 		t.Fatal("неизвестная команда: ожидалось ok=false")
@@ -111,7 +128,7 @@ func TestUnknownCommand(t *testing.T) {
 }
 
 func TestBrokenJSON(t *testing.T) {
-	h := NewHandler("1.0.0", nil)
+	h := NewHandler("1.0.0", nil, nil)
 	r := decode(t, h.Handle([]byte(`{"id":1,"cmd":`)))
 	if r.OK {
 		t.Fatal("битый JSON: ожидалось ok=false")

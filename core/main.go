@@ -78,6 +78,9 @@ func main() {
 		health    = flag.String("health", "1.1.1.1:443", "цель health check (host:port) через туннель (только proxy-режим)")
 		verbose   = flag.Bool("verbose", false, "verbose-логи устройства AmneziaWG")
 		genkey    = flag.Bool("genkey", false, "сгенерировать клиентскую пару ключей и выйти")
+		statePath = flag.String("state", "/var/lib/claude-proxy/vpnd-state.json", "путь к state-файлу фаз full-VPN (только vpnd-режим)")
+		strict    = flag.Bool("strict", false, "строгий kill-switch: без Allow-LAN и с сохранением PF при крахе (только vpnd-режим)")
+		sockUID   = flag.Int("sock-uid", -1, "uid, которому отдать vpnd-сокет; -1 — не менять владельца")
 	)
 	flag.Parse()
 
@@ -96,7 +99,7 @@ func main() {
 	case "proxy":
 		runProxy(*sockPath, *proxyAddr, *health, *verbose)
 	case "vpnd":
-		runVpnd(*sockPath)
+		runVpnd(*sockPath, *statePath, *strict, *sockUID)
 	default:
 		fmt.Fprintf(os.Stderr, "неизвестный режим -mode %q (ожидалось proxy или vpnd)\n", *mode)
 		os.Exit(2)
@@ -137,19 +140,32 @@ func runProxy(sockPath, proxyAddr, healthTarget string, verbose bool) {
 	}
 }
 
-// runVpnd — скелет vpnd-режима: только ipc-транспорт + vpnd-Handler, БЕЗ запуска
-// proxy/туннеля. Реальная VPN-логика появится в задачах 4–8 (§10).
-func runVpnd(sockPath string) {
+// runVpnd — root-демон полного VPN: ipc-транспорт + vpnd-Handler поверх оркестратора
+// Manager (utun/маршруты/DNS/PF, §4). На старте выполняется crash-recovery по
+// stale state (§9). Реальные системные изменения требуют root.
+func runVpnd(sockPath, statePath string, strict bool, sockUID int) {
 	log := newLog()
 	log.Logf("App started (vpnd)")
 
-	handler := vpnd.NewHandler(coreVersion, log)
+	mgr := vpnd.NewManager(statePath, strict, log)
+	// Crash-recovery до приёма команд: если прошлый сеанс не был чисто завершён
+	// (демон/машина падали), вернуть сеть в исходное состояние (§9).
+	mgr.Recover()
+
+	handler := vpnd.NewHandler(coreVersion, log, mgr)
 	srv, err := ipc.NewServer(sockPath, handler.Handle)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "не удалось открыть vpnd-сокет %s: %v\n", sockPath, err)
 		os.Exit(1)
 	}
-	log.Logf("VPN control socket: %s", sockPath)
+	if sockUID >= 0 {
+		if err := os.Chown(sockPath, sockUID, -1); err != nil {
+			log.Logf("не удалось сменить владельца сокета на uid=%d: %v", sockUID, err)
+		} else {
+			log.Logf("vpnd-сокет отдан uid=%d", sockUID)
+		}
+	}
+	log.Logf("VPN control socket: %s (state=%s, strict=%v)", sockPath, statePath, strict)
 	fmt.Printf("claude-proxy-core готов: mode=vpnd control=%s version=%s\n", sockPath, coreVersion)
 
 	sigCh := make(chan os.Signal, 1)
