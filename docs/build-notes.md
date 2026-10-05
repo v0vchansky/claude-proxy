@@ -51,3 +51,41 @@ cd core && go build -o bin/claude-proxy-core .
 ./bin/claude-proxy-core -genkey        # сгенерировать клиентскую пару ключей
 ./bin/claude-proxy-core -sock /tmp/cpc.sock -proxy 127.0.0.1:8118 -verbose
 ```
+
+## Тестовое ядро рядом с приложением — безопасно
+
+Боевое ядро приложения слушает `127.0.0.1:8118`, сокет
+`~/Library/Application Support/ClaudeProxy/control.sock`, журнал
+`~/Library/Application Support/ClaudeProxy/diagnostics.log` (передаётся флагом `-log`).
+Ручной запуск рядом с ним:
+
+```bash
+./bin/claude-proxy-core -sock /tmp/cpc-t.sock -proxy 127.0.0.1:8119 -log /tmp/cpc-t.log
+```
+
+- **Отдельный `-sock` и `-proxy`** — иначе конфликт с сокетом/портом приложения.
+- **`-log`** — свой файл или не задавать вовсе: без `-log` proxy-режим пишет только в
+  память (`logs` отдаёт кольцевой буфер). В боевой журнал тестовое ядро больше не
+  пишет. vpnd без `-log` по-прежнему пишет в `diagnostics.log` в Application Support
+  пользователя, под которым запущен (под root — `/var/root/...`), поэтому ручной
+  `sudo … -mode vpnd` рядом с установленным демоном запускать тоже с `-log`.
+- **Не подключать боевым ключом**, пока приложение подключено. Два процесса с одним
+  ключом — один WG-peer с двух endpoint'ов: сервер перекидывает сессию, у обоих
+  потери пакетов, ретрансмиты, DNS-таймауты. Ядро это запрещает само: `connect`/`switch`
+  берут `flock` на `~/Library/Application Support/ClaudeProxy/locks/tunnel-<hash>.lock`
+  (общий для всех `-sock`), второй процесс получает ошибку «Этот ключ уже используется
+  другим процессом claude-proxy-core (pid N, сокет …)» и туннель не поднимает
+  (docs/control-protocol.md, `connect`). Для тестов — отдельная пара ключей
+  (`-genkey`) и отдельный peer на сервере. vpnd держит такой же лок на свой ключ в
+  `/var/lib/claude-proxy/locks`.
+- **Гасить после теста.** Приложение при старте ищет посторонние `claude-proxy-core`
+  текущего пользователя (кроме vpnd и своего дочернего): о каждом — предупреждение в
+  UI, а ядро из бандла или `core/bin`, которое подключено или занимает 8118/наш
+  сокет, завершает (SIGTERM, через 2 с SIGKILL).
+
+## Тесты
+
+```bash
+cd core && go test ./... && go vet ./...
+cd app && swift build -c release && swift test   # swift test требует Xcode (XCTest)
+```
