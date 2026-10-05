@@ -297,13 +297,20 @@ final class AppModel: ObservableObject {
         let vpn = self.vpnClient
         let key = self.privateKeyB64
         let vpnWasUp = vpnStatus.state == .connected || vpnStatus.state == .connecting
+        let proxyUp = core.state == .connected
         work.async { [weak self] in
-            // 1. Поднять туннель прокси, пока Полный VPN ещё держит маршруты.
-            let result = Result { try client.connect(p, privateKey: key) }
-            // 2. Только при успешном connect опускаем Полный VPN — иначе остались бы без связи.
+            // Прокси-туннель держим поднятым. Если он уже работал (пришли из Полного VPN,
+            // где прокси всё время был жив) — НЕ переподключаем его, чтобы не рвать 8118;
+            // просто опускаем Полный VPN. Если прокси не поднят (пришли из «Выкл») — поднять.
+            var result: Result<CoreState, Error>
+            if proxyUp {
+                result = Result { try client.status() }
+            } else {
+                result = Result { try client.connect(p, privateKey: key) }
+            }
             var vpnState: VpnStatus?
             var vpnWentDown = false
-            if vpnWasUp, case .success(let st) = result, st.state == .connected {
+            if vpnWasUp {
                 vpnState = try? vpn.disconnectFull()
                 vpnWentDown = true
             }
@@ -357,19 +364,23 @@ final class AppModel: ObservableObject {
         uiError = ""
         let client = self.client
         let vpn = self.vpnClient
+        let proxyProfile = p
         let fullProfile = makeFullProfile(p)
+        let key = self.privateKeyB64
         let keyFull = self.privateKeyFullB64
+        let proxyUp = core.state == .connected
         work.async { [weak self] in
-            // 1. Поднять Полный VPN на ключе №2 (.3). Прокси (ключ №1) продолжает работать.
-            let result = Result { try vpn.connectFull(profile: fullProfile, privateKey: keyFull) }
+            // Полный VPN — ЧИСТО ДОБАВОЧНЫЙ. Прокси-туннель (ключ №1) НЕ трогаем вообще:
+            // Claude Code через 8118 продолжает идти по своему туннелю без разрыва, а
+            // Полный VPN лишь добавляет системный туннель на ключе №2 (разные ключи —
+            // туннели не конфликтуют; kill-switch Полного VPN разрешает UDP прокси к серверу).
             var proxyState: CoreState?
-            if case .success(let vs) = result, vs.state == .connected {
-                // 2. Прокси резюмирует через системный utun (direct): 8118 без окна простоя.
-                proxyState = try? client.forward(mode: "direct")
-                // 3. Опустить ненужный WG-туннель прокси (ключ №1). Listener 8118 жив.
-                if let st = try? client.disconnect() { proxyState = st }
+            // Если прокси ещё не поднят (пришли из «Выкл») — поднять его на ключе №1,
+            // чтобы 8118 работал и в режиме Полного VPN.
+            if !proxyUp {
+                proxyState = try? client.connect(proxyProfile, privateKey: key)
             }
-            // 4. При неудаче connectFull форвард/туннель прокси НЕ трогаем — прокси как был.
+            let result = Result { try vpn.connectFull(profile: fullProfile, privateKey: keyFull) }
             DispatchQueue.main.async {
                 if let ps = proxyState { self?.core = ps }
                 self?.applyVpn(result)
@@ -383,15 +394,13 @@ final class AppModel: ObservableObject {
     func exitFullVPN() {
         vpnBusy = true
         uiError = ""
-        let client = self.client
         let vpn = self.vpnClient
         work.async { [weak self] in
-            let proxyState = try? client.forward(mode: "off")   // 1. прокси из direct → off
-            let result = Result { try vpn.disconnectFull() }     // 2. Полный VPN вниз
-            DispatchQueue.main.async {
-                if let ps = proxyState { self?.core = ps }
-                self?.applyVpn(result)
-            }
+            // Прокси-туннель НЕ трогаем — он работал всё время и продолжит работать.
+            // Опускаем только системный туннель Полного VPN; маршруты восстановятся,
+            // прокси (ключ №1) продолжит отдавать 8118 без разрыва.
+            let result = Result { try vpn.disconnectFull() }
+            DispatchQueue.main.async { self?.applyVpn(result) }
         }
     }
 
