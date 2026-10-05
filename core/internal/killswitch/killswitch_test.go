@@ -42,9 +42,10 @@ func TestRenderRules_FailClosedBlocksInetAndInet6(t *testing.T) {
 func TestRenderRules_PassQuickSpecificity(t *testing.T) {
 	rules := RenderRules(sampleParams(true))
 
-	// Обязательные pass quick по убыванию специфичности.
+	// Обязательные pass quick по убыванию специфичности. lo0 идёт первым и в форме
+	// «оба направления, без state» (аналог set skip on lo0 внутри якоря).
 	want := []string{
-		"pass out quick on lo0 all",
+		"pass quick on lo0 all no state",
 		"pass out quick on utun3 inet all keep state",
 		"pass out quick inet proto udp from any to 203.0.113.7 port = 51820 keep state",
 		"pass out quick inet to <cpx_lan> keep state",
@@ -63,10 +64,68 @@ func TestRenderRules_PassQuickSpecificity(t *testing.T) {
 	}
 
 	// lo0 всё разрешаем (all), туннель — только inet.
-	loIdx := strings.Index(rules, "pass out quick on lo0 all")
+	loIdx := strings.Index(rules, "pass quick on lo0 all no state")
 	utunIdx := strings.Index(rules, "pass out quick on utun3 inet all")
 	if loIdx < 0 || utunIdx < 0 {
 		t.Fatalf("lo0/utun правила не на месте")
+	}
+}
+
+// TestRenderRules_LoopbackUnfiltered фиксирует критический фикс loopback: правило
+// для lo0 должно выводить петлю из фильтрации так же, как канонический
+// `set skip on lo0`, но оставаясь ПРАВИЛОМ внутри суб-якоря (откатываемо флашем).
+func TestRenderRules_LoopbackUnfiltered(t *testing.T) {
+	for _, allowLAN := range []bool{true, false} {
+		rules := RenderRules(sampleParams(allowLAN))
+
+		// lo0-правило присутствует в обоих режимах (строгий и с LAN).
+		if !strings.Contains(rules, "pass quick on lo0 all no state") {
+			t.Fatalf("AllowLAN=%v: нет освобождения lo0 `pass quick on lo0 all no state`:\n%s", allowLAN, rules)
+		}
+
+		// Освобождение lo0 идёт ПОСЛЕ fail-closed block (это pass-исключение),
+		// но РАНЬШЕ прочих pass — петля важнее всего и не должна зависеть от них.
+		blockIdx := strings.Index(rules, "block return out all")
+		loIdx := strings.Index(rules, "pass quick on lo0 all no state")
+		utunIdx := strings.Index(rules, "pass out quick on utun3")
+		if !(blockIdx >= 0 && loIdx > blockIdx) {
+			t.Errorf("AllowLAN=%v: lo0-pass должен идти после block (block@%d lo0@%d)", allowLAN, blockIdx, loIdx)
+		}
+		if !(utunIdx >= 0 && loIdx < utunIdx) {
+			t.Errorf("AllowLAN=%v: lo0-pass должен идти раньше utun-pass (lo0@%d utun@%d)", allowLAN, loIdx, utunIdx)
+		}
+
+		// lo0 — без направления (оба) и без state: иначе loopback на macOS рвётся.
+		loLine := ""
+		for _, line := range strings.Split(rules, "\n") {
+			if strings.Contains(line, "on lo0") {
+				loLine = line
+				break
+			}
+		}
+		if loLine == "" {
+			t.Fatalf("AllowLAN=%v: строка правила lo0 не найдена:\n%s", allowLAN, rules)
+		}
+		if strings.Contains(loLine, "keep state") {
+			t.Errorf("AllowLAN=%v: lo0-правило со stateful `keep state` — ломает петлю: %q", allowLAN, loLine)
+		}
+		if !strings.Contains(loLine, "no state") {
+			t.Errorf("AllowLAN=%v: lo0-правило должно быть stateless `no state`: %q", allowLAN, loLine)
+		}
+		if strings.Contains(loLine, "pass out quick on lo0") || strings.Contains(loLine, "pass in quick on lo0") {
+			t.Errorf("AllowLAN=%v: lo0-правило должно быть БЕЗ направления (оба in/out): %q", allowLAN, loLine)
+		}
+
+		// `set skip` в якоре не используем намеренно (глобальная опция main ruleset,
+		// необратима флашем якоря) — его быть не должно.
+		if strings.Contains(rules, "set skip") {
+			t.Errorf("AllowLAN=%v: `set skip` не должен попадать в якорь (глобальная опция, необратима):\n%s", allowLAN, rules)
+		}
+
+		// Анти-утечка не ослаблена: fail-closed дефолт на месте.
+		if !strings.Contains(rules, "block return out all") {
+			t.Errorf("AllowLAN=%v: пропал fail-closed `block return out all`:\n%s", allowLAN, rules)
+		}
 	}
 }
 
@@ -107,7 +166,7 @@ func TestRenderRules_AllowLANToggle(t *testing.T) {
 	}
 	// Остальные правила на месте и без LAN.
 	if !strings.Contains(without, "block return out all") ||
-		!strings.Contains(without, "pass out quick on lo0 all") ||
+		!strings.Contains(without, "pass quick on lo0 all no state") ||
 		!strings.Contains(without, "pass out quick on utun3 inet all keep state") {
 		t.Errorf("AllowLAN=false: базовые правила потерялись:\n%s", without)
 	}
