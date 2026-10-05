@@ -1,6 +1,7 @@
 // Package provision по SSH разворачивает/усыновляет AmneziaWG на VPS:
 // ставит пакет при необходимости, генерит серверные ключи, настраивает awg0,
-// NAT/forwarding/автозапуск и добавляет клиентский peer. Возвращает готовый профиль.
+// NAT/forwarding/автозапуск и добавляет клиентские peer'ы (прокси и, опционально,
+// Полный VPN — разные ключи для бесшовного переключения). Возвращает готовый профиль.
 //
 // SSH-доступ используется только в момент операции и нигде не сохраняется.
 package provision
@@ -34,18 +35,19 @@ type SSHConfig struct {
 // Params — желаемые параметры туннеля для НОВОЙ установки.
 // При усыновлении уже настроенного сервера реальные значения читаются с него.
 type Params struct {
-	AWGPort          int    `json:"awgPort"`
-	ServerVpnAddress string `json:"serverVpnAddress"`
-	ClientVpnAddress string `json:"clientVpnAddress"`
-	Jc               int    `json:"jc"`
-	Jmin             int    `json:"jmin"`
-	Jmax             int    `json:"jmax"`
-	S1               int    `json:"s1"`
-	S2               int    `json:"s2"`
-	H1               uint32 `json:"h1"`
-	H2               uint32 `json:"h2"`
-	H3               uint32 `json:"h3"`
-	H4               uint32 `json:"h4"`
+	AWGPort              int    `json:"awgPort"`
+	ServerVpnAddress     string `json:"serverVpnAddress"`
+	ClientVpnAddress     string `json:"clientVpnAddress"`
+	ClientVpnAddressFull string `json:"clientVpnAddressFull"`
+	Jc                   int    `json:"jc"`
+	Jmin                 int    `json:"jmin"`
+	Jmax                 int    `json:"jmax"`
+	S1                   int    `json:"s1"`
+	S2                   int    `json:"s2"`
+	H1                   uint32 `json:"h1"`
+	H2                   uint32 `json:"h2"`
+	H3                   uint32 `json:"h3"`
+	H4                   uint32 `json:"h4"`
 }
 
 // Result — то, из чего приложение соберёт ServerProfile.
@@ -81,6 +83,9 @@ func (p Params) withDefaults() Params {
 	if p.ClientVpnAddress == "" {
 		p.ClientVpnAddress = "10.77.0.2"
 	}
+	if p.ClientVpnAddressFull == "" {
+		p.ClientVpnAddressFull = "10.77.0.3"
+	}
 	if p.Jc == 0 && p.Jmin == 0 && p.Jmax == 0 {
 		p.Jc, p.Jmin, p.Jmax = 5, 50, 1000
 	}
@@ -95,7 +100,7 @@ func (p Params) withDefaults() Params {
 
 // Provision выполняет установку/усыновление и возвращает профиль.
 // logf (может быть nil) получает человекочитаемые шаги для UI.
-func Provision(sshCfg SSHConfig, params Params, clientPublicKey string, logf func(string)) (Result, error) {
+func Provision(sshCfg SSHConfig, params Params, clientPublicKey, clientPublicKeyFull string, logf func(string)) (Result, error) {
 	if logf == nil {
 		logf = func(string) {}
 	}
@@ -111,7 +116,7 @@ func Provision(sshCfg SSHConfig, params Params, clientPublicKey string, logf fun
 	defer client.Close()
 	logf("SSH подключение установлено")
 
-	script := buildScript(params, clientPublicKey)
+	script := buildScript(params, clientPublicKey, clientPublicKeyFull)
 	logf("Запуск настройки на сервере…")
 	// Шаги (LOG:) эмитятся ВЖИВУЮ по мере выполнения скрипта через logf — чтобы UI
 	// показывал прогресс долгой установки, а не замирал до конца.

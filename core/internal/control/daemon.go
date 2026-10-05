@@ -199,10 +199,10 @@ func (d *Daemon) Disconnect() State {
 
 // Provision разворачивает/усыновляет сервер по SSH. Не трогает текущий туннель.
 // Возвращает результат с профилем и собранным логом шагов.
-func (d *Daemon) Provision(ssh provision.SSHConfig, params provision.Params, clientPub string) (provision.Result, error) {
+func (d *Daemon) Provision(ssh provision.SSHConfig, params provision.Params, clientPub, clientPubFull string) (provision.Result, error) {
 	d.log.Logf("Provision: %s", ssh.Host)
 	var steps []string
-	res, err := provision.Provision(ssh, params, clientPub, func(s string) {
+	res, err := provision.Provision(ssh, params, clientPub, clientPubFull, func(s string) {
 		steps = append(steps, s)
 		d.log.Logf("provision: %s", s)
 	})

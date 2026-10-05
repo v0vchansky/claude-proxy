@@ -10,14 +10,15 @@ import (
 
 // request — входящая команда (JSON Lines).
 type request struct {
-	ID              int                  `json:"id"`
-	Cmd             string               `json:"cmd"`
-	Mode            string               `json:"mode,omitempty"`
-	Profile         *profile.Profile     `json:"profile,omitempty"`
-	PrivKey         string               `json:"privateKey,omitempty"`
-	SSH             *provision.SSHConfig `json:"ssh,omitempty"`
-	Provision       *provision.Params    `json:"provision,omitempty"`
-	ClientPublicKey string               `json:"clientPublicKey,omitempty"`
+	ID                  int                  `json:"id"`
+	Cmd                 string               `json:"cmd"`
+	Mode                string               `json:"mode,omitempty"`
+	Profile             *profile.Profile     `json:"profile,omitempty"`
+	PrivKey             string               `json:"privateKey,omitempty"`
+	SSH                 *provision.SSHConfig `json:"ssh,omitempty"`
+	Provision           *provision.Params    `json:"provision,omitempty"`
+	ClientPublicKey     string               `json:"clientPublicKey,omitempty"`
+	ClientPublicKeyFull string               `json:"clientPublicKeyFull,omitempty"`
 }
 
 // response — ответ на команду.
@@ -116,7 +117,7 @@ func (s *Server) dispatch(line []byte) response {
 		if req.Provision != nil {
 			params = *req.Provision
 		}
-		res, err := s.d.Provision(*req.SSH, params, req.ClientPublicKey)
+		res, err := s.d.Provision(*req.SSH, params, req.ClientPublicKey, req.ClientPublicKeyFull)
 		if err != nil {
 			return response{ID: req.ID, OK: false, Error: err.Error(), Result: res}
 		}

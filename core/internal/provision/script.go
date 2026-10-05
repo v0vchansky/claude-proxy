@@ -15,18 +15,21 @@ import "fmt"
 //	SERVER_PUBLIC_KEY=...     — публичный ключ сервера
 //	AWG_PORT=, SERVER_VPN=, JC=, JMIN=, JMAX=, S1=, S2=, S3=, S4=, H1..H4=
 //	PROVISION_OK             — успешное завершение
-func buildScript(p Params, clientPub string) string {
+func buildScript(p Params, clientPub, clientPubFull string) string {
 	header := fmt.Sprintf(`set -euo pipefail
 
 AWG_PORT=%d
 SERVER_VPN=%q
 CLIENT_VPN=%q
 CLIENT_PUB=%q
+CLIENT_VPN_FULL=%q
+CLIENT_PUB_FULL=%q
 JC=%d; JMIN=%d; JMAX=%d
 S1=%d; S2=%d
 H1=%d; H2=%d; H3=%d; H4=%d
 `,
 		p.AWGPort, p.ServerVpnAddress, p.ClientVpnAddress, clientPub,
+		p.ClientVpnAddressFull, clientPubFull,
 		p.Jc, p.Jmin, p.Jmax, p.S1, p.S2, p.H1, p.H2, p.H3, p.H4)
 
 	return header + scriptBody
@@ -37,6 +40,7 @@ const scriptBody = `
 DIR=/etc/amnezia/amneziawg
 CONF="$DIR/awg0.conf"
 CLIENT_IP="${CLIENT_VPN%%/*}"
+CLIENT_IP_FULL="${CLIENT_VPN_FULL%%/*}"
 
 log(){ echo "LOG:$*"; }
 
@@ -113,9 +117,15 @@ else
   sed -i 's/^S3 = .*/S3 = 0/; s/^S4 = .*/S4 = 0/' "$CONF" || true
 fi
 
-# 6. клиентский peer В КОНФИГ (до bring-up): так awg0 поднимется с peer даже после ребута
+# 6. клиентские peer'ы В КОНФИГ (до bring-up): так awg0 поднимется с peer'ами даже после ребута.
+# peer прокси — всегда; peer Полного VPN — только если задан его публичный ключ.
 if ! grep -q "$CLIENT_PUB" "$CONF"; then
   printf '\n[Peer]\nPublicKey = %s\nAllowedIPs = %s/32\n' "$CLIENT_PUB" "$CLIENT_IP" >> "$CONF"
+fi
+if [ -n "$CLIENT_PUB_FULL" ]; then
+  if ! grep -q "$CLIENT_PUB_FULL" "$CONF"; then
+    printf '\n[Peer]\nPublicKey = %s\nAllowedIPs = %s/32\n' "$CLIENT_PUB_FULL" "$CLIENT_IP_FULL" >> "$CONF"
+  fi
 fi
 
 # 7. ip_forward (персистентно)
@@ -162,7 +172,10 @@ if modprobe amneziawg >/dev/null 2>&1; then
   ip link del awg0 >/dev/null 2>&1 || true
   systemctl restart awg-quick@awg0 2>/dev/null || awg-quick up awg0 || true
   awg set awg0 peer "$CLIENT_PUB" allowed-ips "${CLIENT_IP}/32" 2>/dev/null || true
-  log "Клиентский peer добавлен"
+  if [ -n "$CLIENT_PUB_FULL" ]; then
+    awg set awg0 peer "$CLIENT_PUB_FULL" allowed-ips "${CLIENT_IP_FULL}/32" 2>/dev/null || true
+  fi
+  log "Клиентские peer'ы добавлены"
 else
   log "Kernel-модуль не собран под текущее ядро — перезагрузка сервера для активации"
 fi

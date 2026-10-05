@@ -64,13 +64,15 @@
 ```json
 {
   "id": 5, "cmd": "provision",
-  "clientPublicKey": "<base64, публичный ключ клиента>",
+  "clientPublicKey": "<base64, публичный ключ клиента для прокси>",
+  "clientPublicKeyFull": "<base64, публичный ключ клиента для Полного VPN>",
   "ssh": {
     "host": "1.2.3.4", "port": 22, "user": "root",
     "password": "...", "privateKeyPath": "/path/id_ed25519", "passphrase": "..."
   },
   "provision": {
-    "awgPort": 51820, "serverVpnAddress": "10.77.0.1", "clientVpnAddress": "10.77.0.2",
+    "awgPort": 51820, "serverVpnAddress": "10.77.0.1",
+    "clientVpnAddress": "10.77.0.2", "clientVpnAddressFull": "10.77.0.3",
     "jc": 5, "jmin": 50, "jmax": 1000, "s1": 64, "s2": 128,
     "h1": 1000001, "h2": 1000002, "h3": 1000003, "h4": 1000004
   }
@@ -79,6 +81,11 @@
 
 - `ssh.password` и `ssh.privateKeyPath` оба опциональны, но **хотя бы одно** должно быть задано.
 - `ssh.port` по умолчанию `22`, `ssh.user` — `root`.
+- Сервер получает **два** клиентских peer'а с разными ключами — для бесшовного
+  переключения без переусыновления:
+  - `clientPublicKey` → `clientVpnAddress` (прокси, деф. `10.77.0.2`);
+  - `clientPublicKeyFull` → `clientVpnAddressFull` (Полный VPN, деф. `10.77.0.3`).
+  `clientPublicKeyFull` **опционален**: если пуст или не задан — второй peer не добавляется.
 - Блок `provision` можно слать целиком с дефолтами (как выше), частично или пустым —
   ядро подставит дефолты для незаданных полей.
 
