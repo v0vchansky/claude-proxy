@@ -583,7 +583,10 @@ final class AppModel: ObservableObject {
                     port: res.port,
                     serverPublicKey: res.serverPublicKey,
                     clientVpnAddress: res.clientVpnAddress,
-                    clientVpnAddressFull: params.clientVpnAddressFull,
+                    // Адреса — фактические из ответа: сервер выделяет свободные, а не
+                    // запрошенные (иначе новый клиент получил бы адреса старого).
+                    clientVpnAddressFull: res.clientVpnAddressFull.isEmpty
+                        ? params.clientVpnAddressFull : res.clientVpnAddressFull,
                     serverVpnAddress: res.serverVpnAddress,
                     dns: ["1.1.1.1", "8.8.8.8"],
                     mtu: 1420,

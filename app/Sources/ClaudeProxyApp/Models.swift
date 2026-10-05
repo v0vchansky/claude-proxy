@@ -193,6 +193,9 @@ struct ProvisionResult: Decodable {
     var port: Int = 51820
     var serverVpnAddress: String = "10.77.0.1"
     var clientVpnAddress: String = "10.77.0.2"
+    /// Фактический адрес peer'а Полного VPN, выделенный сервером; пуст, если второй ключ
+    /// не передавался. Оба адреса — из ответа, запрошенные в params лишь предпочтение.
+    var clientVpnAddressFull: String = ""
     var jc: Int = 0
     var jmin: Int = 0
     var jmax: Int = 0
