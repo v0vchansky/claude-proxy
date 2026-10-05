@@ -9,11 +9,13 @@ import (
 	"time"
 
 	"github.com/v0vchansky/claude-proxy/core/internal/health"
+	"github.com/v0vchansky/claude-proxy/core/internal/keylock"
 	"github.com/v0vchansky/claude-proxy/core/internal/killswitch"
 	"github.com/v0vchansky/claude-proxy/core/internal/logbuf"
 	"github.com/v0vchansky/claude-proxy/core/internal/netcfg"
 	"github.com/v0vchansky/claude-proxy/core/internal/profile"
 	"github.com/v0vchansky/claude-proxy/core/internal/vpnmut"
+	"github.com/v0vchansky/claude-proxy/core/internal/wgkey"
 )
 
 // handshakeTimeout — потолок ожидания первого handshake в фазе 1 (как в прокси, §4).
@@ -66,6 +68,56 @@ type Manager struct {
 	pingMs             int   // последний измеренный RTT, мс; -1 если проверки нет/упала
 	lastCheckUnix      int64 // unix-время последней health-проверки
 	connectedSinceUnix int64 // unix-время перехода в connected; 0 вне сеанса
+
+	// Лок «один ключ — один туннель» (keylock), как у прокси-ядра: второй vpnd
+	// (например, ручной sudo-запуск рядом с LaunchDaemon) тем же ключом Полного VPN
+	// не поднимет туннель. lockDir пуст — лок выключен (юнит-тесты).
+	lockDir  string
+	lockSock string
+	keyLock  *keylock.Lock
+}
+
+// SetKeyLock включает лок ключа: lock-файлы в dir, sock — путь сокета этого
+// демона (для текста ошибки у второго претендента).
+func (m *Manager) SetKeyLock(dir, sock string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.lockDir = dir
+	m.lockSock = sock
+}
+
+// acquireKeyLockLocked берёт лок на публичный ключ из privateKeyB64. Занято —
+// ошибка; ошибка ФС — лог и продолжение без защиты (не отнимаем VPN). Требует mu.
+func (m *Manager) acquireKeyLockLocked(privateKeyB64 string) error {
+	if m.lockDir == "" {
+		return nil
+	}
+	pub, err := wgkey.DerivePublic(privateKeyB64)
+	if err != nil {
+		return fmt.Errorf("vpnd: невалидный приватный ключ: %w", err)
+	}
+	if m.keyLock != nil && m.keyLock.PubKey() == pub {
+		return nil
+	}
+	m.releaseKeyLockLocked()
+	l, err := keylock.Acquire(m.lockDir, pub, m.lockSock)
+	if err != nil {
+		if keylock.IsBusy(err) {
+			return err
+		}
+		m.logf(fmt.Sprintf("connect-full: лок ключа не взят (%v) — продолжаю без защиты", err))
+		return nil
+	}
+	m.keyLock = l
+	return nil
+}
+
+// releaseKeyLockLocked отпускает лок ключа, если он взят. Требует mu.
+func (m *Manager) releaseKeyLockLocked() {
+	if m.keyLock != nil {
+		m.keyLock.Release()
+		m.keyLock = nil
+	}
 }
 
 // NewManager собирает боевой Manager: exec поверх os/exec, туннель через fullvpn,
@@ -110,6 +162,18 @@ func (m *Manager) Connect(p profile.Profile, privateKeyB64 string) (map[string]a
 	if err := p.Validate(); err != nil {
 		return nil, fmt.Errorf("vpnd: профиль невалиден: %w", err)
 	}
+
+	// Лок ключа до любых изменений системы. Любой неуспешный выход ниже его
+	// отпускает (часть веток — до rollback/teardownLocked).
+	if err := m.acquireKeyLockLocked(privateKeyB64); err != nil {
+		return nil, err
+	}
+	connected := false
+	defer func() {
+		if !connected {
+			m.releaseKeyLockLocked()
+		}
+	}()
 
 	ctx := context.Background()
 
@@ -227,6 +291,7 @@ func (m *Manager) Connect(p profile.Profile, privateKeyB64 string) (map[string]a
 	}
 
 	m.session = &session{pfRules: pfRules, serverIP: serverIP, gateway: gateway, utun: m.st.Utun}
+	connected = true
 	m.connectedSinceUnix = time.Now().Unix()
 	m.pingMs = -1
 	m.lastCheckUnix = 0
@@ -298,6 +363,7 @@ func (m *Manager) teardownLocked(ctx context.Context, keepPF bool) []error {
 
 	m.stopWatchdogLocked()
 	m.stopHealthLoopLocked()
+	m.releaseKeyLockLocked()
 	m.session = nil
 	m.connectedSinceUnix = 0
 	m.pingMs = -1

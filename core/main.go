@@ -49,18 +49,43 @@ func defaultSockPath() string {
 	return filepath.Join(dir, "control.sock")
 }
 
-// newLog создаёт персистентный журнал диагностики в
-// <Application Support>/ClaudeProxy/diagnostics.log с ретеншеном logRetention.
-// При любой ошибке (нет доступа к пути и т.п.) деградирует на память-онли буфер
-// и фиксирует причину в самом логе — процесс не падает.
-func newLog() *logbuf.Buffer {
+// legacyLogPath — исторический путь журнала <Application Support>/ClaudeProxy/
+// diagnostics.log домашнего каталога текущего пользователя. Для proxy-режима он
+// больше не подставляется сам: приложение передаёт его явно через -log, а ручной
+// (тестовый) запуск без -log пишет только в память и не мешает боевой журнал.
+// Для vpnd остаётся умолчанием: уже установленный LaunchDaemon-plist -log не
+// передаёт (под root это /var/root/..., с боевым журналом пользователя не пересекается).
+func legacyLogPath() (string, error) {
 	dir, err := appSupportDir()
 	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "diagnostics.log"), nil
+}
+
+// resolveLogPath выбирает путь журнала: явный -log (в том числе явная пустая
+// строка = только память) побеждает; иначе proxy → только память, vpnd → legacy.
+func resolveLogPath(mode, flagValue string, flagSet bool) string {
+	if flagSet {
+		return flagValue
+	}
+	if mode == "vpnd" {
+		if p, err := legacyLogPath(); err == nil {
+			return p
+		}
+	}
+	return ""
+}
+
+// newLog создаёт журнал диагностики. path пуст — только память (кольцевой буфер);
+// иначе персистентный файл с ретеншеном logRetention. При ошибке файла деградирует
+// на память-онли и фиксирует причину в самом логе — процесс не падает.
+func newLog(path string) *logbuf.Buffer {
+	if path == "" {
 		l := logbuf.New(500)
-		l.Logf("Diagnostics log: память-онли (не удалось определить путь: %v)", err)
+		l.Logf("Diagnostics log: память-онли (-log не задан)")
 		return l
 	}
-	path := filepath.Join(dir, "diagnostics.log")
 	l, err := logbuf.NewWithFile(500, path, logRetention)
 	if err != nil {
 		l = logbuf.New(500)
@@ -68,6 +93,17 @@ func newLog() *logbuf.Buffer {
 		return l
 	}
 	return l
+}
+
+// proxyLockDir — каталог локов клиентских ключей proxy-режима. Общий для всех
+// процессов пользователя независимо от -sock: в этом и смысл — тестовое ядро на
+// своём сокете не должно подключиться боевым ключом параллельно с приложением.
+func proxyLockDir() string {
+	dir, err := appSupportDir()
+	if err != nil {
+		return filepath.Join(os.TempDir(), "claude-proxy-locks")
+	}
+	return filepath.Join(dir, "locks")
 }
 
 func main() {
@@ -81,8 +117,17 @@ func main() {
 		statePath = flag.String("state", "/var/lib/claude-proxy/vpnd-state.json", "путь к state-файлу фаз full-VPN (только vpnd-режим)")
 		strict    = flag.Bool("strict", false, "строгий kill-switch: без Allow-LAN и с сохранением PF при крахе (только vpnd-режим)")
 		sockUID   = flag.Int("sock-uid", -1, "uid, которому отдать vpnd-сокет; -1 — не менять владельца")
+		logPath   = flag.String("log", "", "путь персистентного журнала диагностики; пусто — только память (proxy); для vpnd по умолчанию прежний путь в Application Support root")
 	)
 	flag.Parse()
+
+	logSet := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "log" {
+			logSet = true
+		}
+	})
+	logFile := resolveLogPath(*mode, *logPath, logSet)
 
 	if *genkey {
 		priv, pub, err := wgkey.Generate()
@@ -97,9 +142,9 @@ func main() {
 
 	switch *mode {
 	case "proxy":
-		runProxy(*sockPath, *proxyAddr, *health, *verbose)
+		runProxy(*sockPath, *proxyAddr, *health, *verbose, logFile)
 	case "vpnd":
-		runVpnd(*sockPath, *statePath, *strict, *sockUID)
+		runVpnd(*sockPath, *statePath, *strict, *sockUID, logFile)
 	default:
 		fmt.Fprintf(os.Stderr, "неизвестный режим -mode %q (ожидалось proxy или vpnd)\n", *mode)
 		os.Exit(2)
@@ -107,11 +152,14 @@ func main() {
 }
 
 // runProxy — текущий proxy-режим без изменений: proxy-демон + control-сокет.
-func runProxy(sockPath, proxyAddr, healthTarget string, verbose bool) {
-	log := newLog()
-	log.Logf("App started (core)")
+func runProxy(sockPath, proxyAddr, healthTarget string, verbose bool, logFile string) {
+	log := newLog(logFile)
+	log.Logf("App started (core, pid=%d)", os.Getpid())
 
 	daemon := control.NewDaemon(proxyAddr, healthTarget, log, verbose)
+	// Один клиентский ключ — один туннель на машине (см. keylock): лок общий для
+	// всех процессов пользователя, независимо от -sock.
+	daemon.SetKeyLock(proxyLockDir(), sockPath)
 
 	// Listener 8118 поднимается один раз и живёт до завершения процесса (вариант А):
 	// порт доступен всегда, а connect/disconnect/forward лишь переключают dial-режим.
@@ -150,11 +198,13 @@ func runProxy(sockPath, proxyAddr, healthTarget string, verbose bool) {
 // runVpnd — root-демон полного VPN: ipc-транспорт + vpnd-Handler поверх оркестратора
 // Manager (utun/маршруты/DNS/PF, §4). На старте выполняется crash-recovery по
 // stale state (§9). Реальные системные изменения требуют root.
-func runVpnd(sockPath, statePath string, strict bool, sockUID int) {
-	log := newLog()
-	log.Logf("App started (vpnd)")
+func runVpnd(sockPath, statePath string, strict bool, sockUID int, logFile string) {
+	log := newLog(logFile)
+	log.Logf("App started (vpnd, pid=%d)", os.Getpid())
 
 	mgr := vpnd.NewManager(statePath, strict, log)
+	// Лок ключа Полного VPN рядом со state (root-only каталог /var/lib/claude-proxy).
+	mgr.SetKeyLock(filepath.Join(filepath.Dir(statePath), "locks"), sockPath)
 	// Crash-recovery до приёма команд: если прошлый сеанс не был чисто завершён
 	// (демон/машина падали), вернуть сеть в исходное состояние (§9).
 	mgr.Recover()

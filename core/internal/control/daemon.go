@@ -8,12 +8,14 @@ import (
 	"time"
 
 	"github.com/v0vchansky/claude-proxy/core/internal/health"
+	"github.com/v0vchansky/claude-proxy/core/internal/keylock"
 	"github.com/v0vchansky/claude-proxy/core/internal/logbuf"
 	"github.com/v0vchansky/claude-proxy/core/internal/netcfg"
 	"github.com/v0vchansky/claude-proxy/core/internal/profile"
 	"github.com/v0vchansky/claude-proxy/core/internal/provision"
 	"github.com/v0vchansky/claude-proxy/core/internal/proxy"
 	"github.com/v0vchansky/claude-proxy/core/internal/tunnel"
+	"github.com/v0vchansky/claude-proxy/core/internal/wgkey"
 )
 
 const (
@@ -42,6 +44,64 @@ type Daemon struct {
 	priv string // приватный ключ клиента в памяти; не логируется, не сохраняется
 
 	healthCancel context.CancelFunc
+
+	// Межпроцессный лок «один ключ — один туннель» (см. keylock). lockDir пуст —
+	// лок выключен (юнит-тесты без ФС). keyLock трогается только под opMu.
+	lockDir  string
+	lockSock string
+	keyLock  *keylock.Lock
+}
+
+// SetKeyLock включает межпроцессную блокировку клиентского ключа: lock-файлы в dir,
+// sock — путь control-сокета этого процесса (попадает в текст ошибки у второго
+// претендента). Вызывать до первого connect.
+func (d *Daemon) SetKeyLock(dir, sock string) {
+	d.opMu.Lock()
+	defer d.opMu.Unlock()
+	d.lockDir = dir
+	d.lockSock = sock
+}
+
+// acquireKeyLock берёт лок на публичный ключ, выведенный из privateKey. Вызывается
+// под opMu ДО любых сетевых действий: занятый ключ → туннель не поднимается вовсе.
+// Уже держим лок на этот же ключ (switch/reconnect тем же ключом) → no-op, без
+// самоблокировки. Ошибка ФС (не занятость) не блокирует подключение: пишем в лог
+// и продолжаем без защиты — сломанный каталог локов не должен отнимать прокси.
+func (d *Daemon) acquireKeyLock(privateKey string) error {
+	if d.lockDir == "" {
+		return nil
+	}
+	pub, err := wgkey.DerivePublic(privateKey)
+	if err != nil {
+		return fmt.Errorf("невалидный приватный ключ клиента: %w", err)
+	}
+	if d.keyLock != nil {
+		if d.keyLock.PubKey() == pub {
+			return nil
+		}
+		d.releaseKeyLock()
+	}
+	l, err := keylock.Acquire(d.lockDir, pub, d.lockSock)
+	if err != nil {
+		if keylock.IsBusy(err) {
+			return err
+		}
+		d.log.Logf("Key lock: не удалось взять (%v) — продолжаю без защиты от второго подключения", err)
+		return nil
+	}
+	d.keyLock = l
+	d.log.Logf("Key lock: взят (%s)", l.Path())
+	return nil
+}
+
+// releaseKeyLock отпускает лок ключа, если он взят. Под opMu.
+func (d *Daemon) releaseKeyLock() {
+	if d.keyLock == nil {
+		return
+	}
+	d.keyLock.Release()
+	d.keyLock = nil
+	d.log.Logf("Key lock: отпущен")
 }
 
 // NewDaemon создаёт демон. proxyAddr обычно "127.0.0.1:8118".
@@ -247,6 +307,12 @@ func (d *Daemon) Healthcheck() State {
 // bringUp открывает туннель, ждёт handshake, запускает proxy и первый health check.
 // Вызывается под opMu.
 func (d *Daemon) bringUp(p profile.Profile, privateKey string) error {
+	// Лок ключа — первым делом: второй процесс с тем же ключом не должен даже
+	// начинать handshake (сервер начнёт перекидывать peer между endpoint'ами).
+	if err := d.acquireKeyLock(privateKey); err != nil {
+		return err
+	}
+
 	var devLog func(string, ...any)
 	if d.verbose {
 		devLog = d.log.Logf
@@ -325,10 +391,11 @@ func (d *Daemon) bringUp(p profile.Profile, privateKey string) error {
 	return nil
 }
 
-// teardown останавливает health loop и WG-туннель и переводит forward-режим в off.
-// Listener 8118 НЕ трогает — он живёт до Shutdown. Вызывается под opMu.
+// teardown останавливает health loop и WG-туннель, переводит forward-режим в off и
+// отпускает лок ключа. Listener 8118 НЕ трогает — он живёт до Shutdown. Под opMu.
 func (d *Daemon) teardown(reason string) {
 	d.stopHealthLoop()
+	defer d.releaseKeyLock()
 
 	d.mu.Lock()
 	tun := d.tun
