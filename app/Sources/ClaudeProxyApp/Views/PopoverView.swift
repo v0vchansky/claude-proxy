@@ -119,7 +119,7 @@ struct PopoverView: View {
                 HStack(spacing: 6) {
                     Circle().fill(model.statusColor).frame(width: 9, height: 9)
                     Image(systemName: "network.badge.shield.half.filled")
-                    Text("Прокси + VPN: \(model.vpnStatus.state.title)").font(.subheadline).bold()
+                    Text(model.vpnStatus.state.title).font(.subheadline).bold()
                     if model.vpnBusy { ProgressView().controlSize(.small).padding(.leading, 4) }
                 }
                 if model.vpnStatus.state == .connected {
