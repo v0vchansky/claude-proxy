@@ -3,17 +3,14 @@ import SwiftUI
 struct PopoverView: View {
     @EnvironmentObject var model: AppModel
     @Environment(\.openWindow) private var openWindow
-    @State private var copiedKey = false
     @State private var copiedCmd = false
-    @State private var copiedDiag = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             header
             Divider()
-            modeSwitcher
             statusBlock
-            vpnStatusBlock
+            modeSwitcher
             Divider()
             serverBlock
             localProxyBlock
@@ -60,40 +57,6 @@ struct PopoverView: View {
         }
     }
 
-    // Статус Full VPN — показываем, когда выбран этот режим или идёт его подъём.
-    @ViewBuilder private var vpnStatusBlock: some View {
-        if model.currentMode == .full || model.vpnBusy {
-            VStack(alignment: .leading, spacing: 4) {
-                HStack(spacing: 6) {
-                    Image(systemName: "network.badge.shield.half.filled")
-                    Text("Полный VPN: \(model.vpnStatus.state.title)").font(.caption).bold()
-                    if model.vpnBusy { ProgressView().controlSize(.small).padding(.leading, 4) }
-                }
-                if model.vpnStatus.state == .connected {
-                    if !model.vpnStatus.utun.isEmpty {
-                        Text("Интерфейс: \(model.vpnStatus.utun)")
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
-                    Text("Kill-switch: \(model.vpnStatus.killSwitch ? "вкл" : "выкл")")
-                        .font(.caption)
-                        .foregroundStyle(model.vpnStatus.killSwitch ? Color.green : Color.orange)
-                    Text("Пинг: \(model.pingText(model.vpnStatus.pingMs))")
-                        .font(.caption).foregroundStyle(.secondary)
-                    Text("Проверено: \(model.agoText(model.vpnStatus.lastCheckUnix))")
-                        .font(.caption).foregroundStyle(.secondary)
-                    Text("На связи: \(model.uptimeText(since: model.vpnStatus.connectedSinceUnix))")
-                        .font(.caption).foregroundStyle(.secondary)
-                    Text("Трафик: ↓ \(model.bytesText(model.vpnStatus.rxBytes))  ↑ \(model.bytesText(model.vpnStatus.txBytes))")
-                        .font(.caption).foregroundStyle(.secondary)
-                    if model.vpnStatus.doubleVpnWarning {
-                        Text("Внимание: уже активен другой VPN")
-                            .font(.caption).foregroundStyle(.orange)
-                    }
-                }
-            }
-        }
-    }
-
     // Онбординг установки системного компонента (root-демона vpnd).
     private var onboardingSheet: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -128,20 +91,61 @@ struct PopoverView: View {
         .frame(width: 360)
     }
 
-    private var statusBlock: some View {
+    // Единый блок статуса под переключателем режимов. Ветвится по актуальному
+    // режиму (currentMode): Выкл → только серая лампа «Отключено»; Прокси →
+    // состояние и метрики из core; Полный VPN → состояние и метрики из vpnStatus.
+    @ViewBuilder private var statusBlock: some View {
         VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 6) {
-                Circle().fill(model.statusColor).frame(width: 9, height: 9)
-                Text(model.core.state.title).font(.subheadline).bold()
-                if model.busy { ProgressView().controlSize(.small).padding(.leading, 4) }
-            }
-            if model.core.state == .connected || model.core.state == .error {
-                Text("Пинг: \(model.pingText)").font(.caption).foregroundStyle(.secondary)
-                Text("Проверено: \(model.lastCheckText)").font(.caption).foregroundStyle(.secondary)
-                Text("На связи: \(model.uptimeText)").font(.caption).foregroundStyle(.secondary)
-                Text("Трафик: ↓ \(model.rxText)  ↑ \(model.txText)").font(.caption).foregroundStyle(.secondary)
+            switch model.currentMode {
+            case .off:
+                HStack(spacing: 6) {
+                    Circle().fill(model.statusColor).frame(width: 9, height: 9)
+                    Text("Отключено").font(.subheadline).bold()
+                }
+
+            case .proxy:
+                HStack(spacing: 6) {
+                    Circle().fill(model.statusColor).frame(width: 9, height: 9)
+                    Text(model.core.state.title).font(.subheadline).bold()
+                    if model.busy { ProgressView().controlSize(.small).padding(.leading, 4) }
+                }
+                if model.core.state == .connected || model.core.state == .error {
+                    statusLine("Пинг: \(model.pingText)")
+                    statusLine("Проверено: \(model.lastCheckText)")
+                    statusLine("На связи: \(model.uptimeText)")
+                    statusLine("Трафик: ↓ \(model.rxText)  ↑ \(model.txText)")
+                }
+
+            case .full:
+                HStack(spacing: 6) {
+                    Circle().fill(model.statusColor).frame(width: 9, height: 9)
+                    Image(systemName: "network.badge.shield.half.filled")
+                    Text("Полный VPN: \(model.vpnStatus.state.title)").font(.subheadline).bold()
+                    if model.vpnBusy { ProgressView().controlSize(.small).padding(.leading, 4) }
+                }
+                if model.vpnStatus.state == .connected {
+                    if !model.vpnStatus.utun.isEmpty {
+                        statusLine("Интерфейс: \(model.vpnStatus.utun)")
+                    }
+                    Text("Kill-switch: \(model.vpnStatus.killSwitch ? "вкл" : "выкл")")
+                        .font(.caption)
+                        .foregroundStyle(model.vpnStatus.killSwitch ? Color.green : Color.orange)
+                    statusLine("Пинг: \(model.pingText(model.vpnStatus.pingMs))")
+                    statusLine("Проверено: \(model.agoText(model.vpnStatus.lastCheckUnix))")
+                    statusLine("На связи: \(model.uptimeText(since: model.vpnStatus.connectedSinceUnix))")
+                    statusLine("Трафик: ↓ \(model.bytesText(model.vpnStatus.rxBytes))  ↑ \(model.bytesText(model.vpnStatus.txBytes))")
+                    if model.vpnStatus.doubleVpnWarning {
+                        Text("Внимание: уже активен другой VPN")
+                            .font(.caption).foregroundStyle(.orange)
+                    }
+                }
             }
         }
+    }
+
+    // Строка детали статуса — одинаковое оформление для всех метрик.
+    private func statusLine(_ text: String) -> some View {
+        Text(text).font(.caption).foregroundStyle(.secondary)
     }
 
     private var serverBlock: some View {
@@ -199,31 +203,15 @@ struct PopoverView: View {
             }
             .help("Скопировать команду запуска Claude Code через прокси")
 
+            // Журнал и Серверы — в один ряд.
             HStack(spacing: 8) {
                 Button {
-                    model.copyPublicKey(); flash($copiedKey)
+                    NSApp.activate(ignoringOtherApps: true)
+                    openWindow(id: "logs")
                 } label: {
-                    Text(copiedKey ? "Скопировано" : "Скопировать публичный ключ").frame(maxWidth: .infinity)
+                    Label("Журнал", systemImage: "list.bullet.rectangle").frame(maxWidth: .infinity)
                 }
-                .help("Скопировать публичный ключ клиента для добавления на сервер")
-                Button {
-                    model.copyDiagnostics(); flash($copiedDiag)
-                } label: {
-                    Text(copiedDiag ? "Скопировано" : "Скопировать диагностику").frame(maxWidth: .infinity)
-                }
-                .help("Скопировать технический журнал за последние 3 дня")
-            }
-
-            // Открыть встроенный просмотрщик журнала логов.
-            Button {
-                NSApp.activate(ignoringOtherApps: true)
-                openWindow(id: "logs")
-            } label: {
-                Label("Журнал", systemImage: "list.bullet.rectangle").frame(maxWidth: .infinity)
-            }
-            .help("Открыть окно журнала логов")
-
-            HStack(spacing: 8) {
+                .help("Открыть окно журнала логов")
                 Button {
                     NSApp.activate(ignoringOtherApps: true)
                     openWindow(id: "servers")
@@ -231,13 +219,14 @@ struct PopoverView: View {
                     Text("Серверы…").frame(maxWidth: .infinity)
                 }
                 .help("Управление серверами")
-                Button {
-                    NSApplication.shared.terminate(nil)
-                } label: {
-                    Text("Выход").frame(maxWidth: .infinity)
-                }
-                .help("Закрыть приложение")
             }
+
+            Button {
+                NSApplication.shared.terminate(nil)
+            } label: {
+                Text("Выход").frame(maxWidth: .infinity)
+            }
+            .help("Закрыть приложение")
 
             Divider().padding(.vertical, 2)
 

@@ -654,13 +654,19 @@ final class AppModel: ObservableObject {
     var rxText: String { bytesText(core.rxBytes) }
     var txText: String { bytesText(core.txBytes) }
 
-    /// Иконка menu bar по состоянию (SF Symbol).
+    /// Иконка menu bar по ТЕКУЩЕМУ режиму (SF Symbol). Четыре визуально разных
+    /// состояния: выключено / прокси-подключён / полный VPN-подключён / ошибка.
+    /// Промежуточные фазы (connecting/switching) дают нейтральный `shield`.
     var iconName: String {
-        switch core.state {
-        case .connected:              return "shield.lefthalf.filled"
-        case .connecting, .switching: return "shield"
-        case .error:                  return "exclamationmark.shield"
-        case .disconnected:           return "shield.slash"
+        switch currentMode {
+        case .off:
+            // Ошибка в любом источнике — единый тревожный символ, иначе «выключено».
+            if core.state == .error || vpnStatus.state == .error { return "exclamationmark.shield" }
+            return "shield.slash"
+        case .proxy:
+            return core.state == .connected ? "shield.lefthalf.filled" : "shield"
+        case .full:
+            return vpnStatus.state == .connected ? "lock.shield.fill" : "shield"
         }
     }
 
@@ -672,12 +678,27 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Цвет лампочки статуса по ТЕКУЩЕМУ режиму: зелёная (подключено),
+    /// жёлтая (подключение/переключение), красная (ошибка), серая (выключено).
     var statusColor: Color {
-        switch core.state {
-        case .connected:              return .green
-        case .connecting, .switching: return .yellow
-        case .error:                  return .red
-        case .disconnected:           return .secondary
+        switch currentMode {
+        case .off:
+            if core.state == .error || vpnStatus.state == .error { return .red }
+            return .secondary
+        case .proxy:
+            switch core.state {
+            case .connected:              return .green
+            case .connecting, .switching: return .yellow
+            case .error:                  return .red
+            case .disconnected:           return .secondary
+            }
+        case .full:
+            switch vpnStatus.state {
+            case .connected:  return .green
+            case .connecting: return .yellow
+            case .error:      return .red
+            case .off:        return .secondary
+            }
         }
     }
 }

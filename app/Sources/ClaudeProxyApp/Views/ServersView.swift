@@ -7,6 +7,7 @@ struct ServersView: View {
     @State private var draft: ServerProfile = .defaultHostkey
     @State private var isNew = false
     @State private var showProvision = false
+    @State private var copiedKey = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -41,6 +42,16 @@ struct ServersView: View {
         HStack {
             Text("Серверы").font(.title3).bold()
             Spacer()
+            // Публичный ключ клиента — добавляется на сервер при ручной настройке.
+            Button {
+                model.copyPublicKey()
+                copiedKey = true
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { copiedKey = false }
+            } label: {
+                Label(copiedKey ? "Скопировано" : "Скопировать публичный ключ",
+                      systemImage: copiedKey ? "checkmark" : "doc.on.doc")
+            }
+            .help("Публичный ключ клиента для добавления на сервер")
             Menu {
                 Button("Авто (по SSH)") {
                     model.resetProvisionState()
