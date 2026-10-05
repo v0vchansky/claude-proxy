@@ -317,15 +317,23 @@ final class AppModel: ObservableObject {
         let vpn = self.vpnClient
         let p = self.active
         let key = self.privateKeyB64
+        let proxyWasUp = core.state != .disconnected
         work.async { [weak self] in
             guard let p else { DispatchQueue.main.async { self?.vpnBusy = false }; return }
-            // 1. Поднять Полный VPN.
+            // 1. СНАЧАЛА опускаем WG-туннель прокси, чтобы освободить ключ. Иначе два
+            //    туннеля с одним ключом одновременно долбятся в сервер — он «мечется»
+            //    между источниками (WireGuard roaming flap) и рвёт связь на все секунды
+            //    handshake Полного VPN. Listener 8118 при этом остаётся жив.
+            if proxyWasUp { _ = try? client.disconnect() }
+            // 2. Поднять Полный VPN — ключ свободен, handshake чистый и быстрый.
             let result = Result { try vpn.connectFull(profile: p, privateKey: key) }
-            // 2. Только при успешном connected — опустить туннель прокси и включить direct.
             var proxyState: CoreState?
             if case .success(let vs) = result, vs.state == .connected {
-                _ = try? client.disconnect()                       // туннель прокси вниз, mode→off
-                proxyState = try? client.forward(mode: "direct")   // 8118 → системный utun
+                // 3. Прокси резюмирует через системный utun (direct): 8118 снова рабочий.
+                proxyState = try? client.forward(mode: "direct")
+            } else if proxyWasUp {
+                // Не удалось поднять Полный VPN — вернуть прокси, чтобы не остаться без связи.
+                proxyState = try? client.connect(p, privateKey: key)
             }
             DispatchQueue.main.async {
                 if let ps = proxyState { self?.core = ps }
