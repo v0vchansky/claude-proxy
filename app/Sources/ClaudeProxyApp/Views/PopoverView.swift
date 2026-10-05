@@ -20,7 +20,6 @@ struct PopoverView: View {
                 Text("Ядро не запущено — проверь сборку бандла")
                     .font(.caption).foregroundStyle(.red)
             }
-            lastErrorBlock
         }
         .padding(14)
         .frame(width: 340)
@@ -64,7 +63,7 @@ struct PopoverView: View {
                 Image(systemName: "lock.shield").font(.title2)
                 Text("Установить системный компонент").font(.headline)
             }
-            Text("Полный VPN направляет весь трафик системы через туннель. Для этого нужен системный компонент (root-демон). При установке macOS запросит пароль администратора — он нужен один раз.")
+            Text("Прокси + VPN направляет весь трафик системы через туннель. Для этого нужен системный компонент (root-демон). При установке macOS запросит пароль администратора — он нужен один раз.")
                 .font(.callout).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             if !model.uiError.isEmpty {
@@ -124,7 +123,12 @@ struct PopoverView: View {
                     if model.vpnBusy { ProgressView().controlSize(.small).padding(.leading, 4) }
                 }
                 if model.vpnStatus.state == .connected {
-                    // Тот же набор строк, что и у режима Прокси (единое оформление).
+                    if !model.vpnStatus.utun.isEmpty {
+                        statusLine("Интерфейс: \(model.vpnStatus.utun)")
+                    }
+                    Text("Kill-switch: \(model.vpnStatus.killSwitch ? "вкл" : "выкл")")
+                        .font(.caption)
+                        .foregroundStyle(model.vpnStatus.killSwitch ? Color.green : Color.orange)
                     statusLine("Пинг: \(model.pingText(model.vpnStatus.pingMs))")
                     statusLine("Проверено: \(model.agoText(model.vpnStatus.lastCheckUnix))")
                     statusLine("На связи: \(model.uptimeText(since: model.vpnStatus.connectedSinceUnix))")
@@ -232,15 +236,6 @@ struct PopoverView: View {
         .controlSize(.regular)
     }
 
-    private var lastErrorBlock: some View {
-        HStack(alignment: .top, spacing: 4) {
-            Text("Последняя ошибка:").font(.caption).foregroundStyle(.secondary)
-            Text(model.uiError.isEmpty ? "—" : model.uiError)
-                .font(.caption)
-                .foregroundStyle(model.uiError.isEmpty ? Color.secondary : Color.red)
-                .textSelection(.enabled)
-        }
-    }
 
     private func flash(_ binding: Binding<Bool>) {
         binding.wrappedValue = true

@@ -447,7 +447,7 @@ final class AppModel: ObservableObject {
                     self.vpnInstalled = true
                     self.showVpndOnboarding = false
                     if ready { self.enterFullVPN() }
-                    else { self.uiError = "Демон установлен, но ещё запускается — выберите «Полный VPN» ещё раз" }
+                    else { self.uiError = "Демон установлен, но ещё запускается — выберите «Прокси + VPN» ещё раз" }
                 case .failure(let err):
                     if case VpnInstaller.InstallError.cancelled = err {
                         self.showVpndOnboarding = false
