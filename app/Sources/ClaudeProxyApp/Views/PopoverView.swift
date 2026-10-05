@@ -44,7 +44,7 @@ struct PopoverView: View {
             )) {
                 Text("Выкл").tag(AppModel.AppMode.off)
                 Text("Прокси").tag(AppModel.AppMode.proxy)
-                Text("Полный VPN").tag(AppModel.AppMode.full)
+                Text("Прокси + VPN").tag(AppModel.AppMode.full)
             }
             .pickerStyle(.segmented)
             .labelsHidden()
@@ -120,24 +120,15 @@ struct PopoverView: View {
                 HStack(spacing: 6) {
                     Circle().fill(model.statusColor).frame(width: 9, height: 9)
                     Image(systemName: "network.badge.shield.half.filled")
-                    Text("Полный VPN: \(model.vpnStatus.state.title)").font(.subheadline).bold()
+                    Text("Прокси + VPN: \(model.vpnStatus.state.title)").font(.subheadline).bold()
                     if model.vpnBusy { ProgressView().controlSize(.small).padding(.leading, 4) }
                 }
                 if model.vpnStatus.state == .connected {
-                    if !model.vpnStatus.utun.isEmpty {
-                        statusLine("Интерфейс: \(model.vpnStatus.utun)")
-                    }
-                    Text("Kill-switch: \(model.vpnStatus.killSwitch ? "вкл" : "выкл")")
-                        .font(.caption)
-                        .foregroundStyle(model.vpnStatus.killSwitch ? Color.green : Color.orange)
+                    // Тот же набор строк, что и у режима Прокси (единое оформление).
                     statusLine("Пинг: \(model.pingText(model.vpnStatus.pingMs))")
                     statusLine("Проверено: \(model.agoText(model.vpnStatus.lastCheckUnix))")
                     statusLine("На связи: \(model.uptimeText(since: model.vpnStatus.connectedSinceUnix))")
                     statusLine("Трафик: ↓ \(model.bytesText(model.vpnStatus.rxBytes))  ↑ \(model.bytesText(model.vpnStatus.txBytes))")
-                    if model.vpnStatus.doubleVpnWarning {
-                        Text("Внимание: уже активен другой VPN")
-                            .font(.caption).foregroundStyle(.orange)
-                    }
                 }
             }
         }
