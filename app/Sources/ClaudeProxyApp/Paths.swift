@@ -11,6 +11,8 @@ enum AppPaths {
 
     static var controlSocket: URL { supportDir.appendingPathComponent("control.sock") }
     static var serversJSON: URL { supportDir.appendingPathComponent("servers.json") }
+    /// Боевой журнал диагностики ядра (передаётся ядру флагом -log).
+    static var diagnosticsLog: URL { supportDir.appendingPathComponent("diagnostics.log") }
 
     /// Путь к бинарю ядра: в бандле (Contents/Helpers) или dev-fallback рядом с репозиторием.
     static func coreBinary() -> String? {

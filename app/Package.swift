@@ -8,6 +8,12 @@ let package = Package(
         .executableTarget(
             name: "ClaudeProxyApp",
             path: "Sources/ClaudeProxyApp"
+        ),
+        // Юнит-тесты чистой логики приложения (swift test; нужен Xcode ради XCTest).
+        .testTarget(
+            name: "ClaudeProxyAppTests",
+            dependencies: ["ClaudeProxyApp"],
+            path: "Tests/ClaudeProxyAppTests"
         )
     ]
 )

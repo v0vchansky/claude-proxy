@@ -53,7 +53,8 @@ final class AppModel: ObservableObject {
 
     init() {
         let sock = AppPaths.controlSocket.path
-        self.coreProc = CoreProcess(socketPath: sock, proxyAddr: "127.0.0.1:8118")
+        self.coreProc = CoreProcess(socketPath: sock, proxyAddr: "127.0.0.1:8118",
+                                    logPath: AppPaths.diagnosticsLog.path)
         self.client = ControlClient(socketPath: sock)
         self.profiles = store.profiles
         self.activeID = store.activeID
@@ -75,6 +76,8 @@ final class AppModel: ObservableObject {
         coreAvailable = coreProc.start()
         if !coreAvailable {
             uiError = "Не найден бинарь ядра (claude-proxy-core)"
+        } else if !coreProc.foreignWarnings.isEmpty {
+            uiError = coreProc.foreignWarnings.joined(separator: "\n")
         }
 
         vpnInstalled = vpnInstaller.isInstalled()

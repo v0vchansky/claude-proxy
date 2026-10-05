@@ -5,10 +5,16 @@ final class CoreProcess {
     private var process: Process?
     private let socketPath: String
     private let proxyAddr: String
+    private let logPath: String
 
-    init(socketPath: String, proxyAddr: String) {
+    /// Предупреждения о посторонних ядрах, найденных при последнем start()
+    /// (см. ForeignCores). Пусто — чужих ядер нет.
+    private(set) var foreignWarnings: [String] = []
+
+    init(socketPath: String, proxyAddr: String, logPath: String) {
         self.socketPath = socketPath
         self.proxyAddr = proxyAddr
+        self.logPath = logPath
     }
 
     var isRunning: Bool { process?.isRunning ?? false }
@@ -24,12 +30,19 @@ final class CoreProcess {
         // Матчим по уникальному пути контрол-сокета — демон vpnd (/var/run/...) не затрагивается.
         killStaleProxyCore()
 
+        // Посторонние ядра на других сокетах/портах (ручной тестовый запуск и т.п.):
+        // предупредить, а мешающие из нашего бандла/core/bin — завершить.
+        foreignWarnings = ForeignCores.scanAndHandle(ourSock: socketPath, ourProxy: proxyAddr,
+                                                     ourCore: bin)
+
         // Снять возможный stale-сокет.
         try? FileManager.default.removeItem(atPath: socketPath)
 
         let p = Process()
         p.executableURL = URL(fileURLWithPath: bin)
-        p.arguments = ["-sock", socketPath, "-proxy", proxyAddr]
+        // Журнал передаём явно: ядро без -log пишет только в память (ручной запуск
+        // не должен мешать боевой diagnostics.log).
+        p.arguments = ["-sock", socketPath, "-proxy", proxyAddr, "-log", logPath]
         p.standardOutput = FileHandle.nullDevice
         p.standardError = FileHandle.nullDevice
         do {
