@@ -34,6 +34,7 @@ type SSHConfig struct {
 
 // Params — желаемые параметры туннеля для НОВОЙ установки.
 // При усыновлении уже настроенного сервера реальные значения читаются с него.
+// Адреса клиента — только предпочтение: сервер выдаёт свободные в своей подсети.
 type Params struct {
 	AWGPort              int    `json:"awgPort"`
 	ServerVpnAddress     string `json:"serverVpnAddress"`
@@ -51,26 +52,29 @@ type Params struct {
 }
 
 // Result — то, из чего приложение соберёт ServerProfile.
+// ClientVpnAddress/ClientVpnAddressFull — ФАКТИЧЕСКИЕ адреса peer'ов, выделенные сервером
+// (запрошенные в Params — лишь предпочтение); Full пуст, если второй ключ не передавался.
 type Result struct {
-	ServerPublicKey  string   `json:"serverPublicKey"`
-	Host             string   `json:"host"`
-	Port             int      `json:"port"`
-	ServerVpnAddress string   `json:"serverVpnAddress"`
-	ClientVpnAddress string   `json:"clientVpnAddress"`
-	Jc               int      `json:"jc"`
-	Jmin             int      `json:"jmin"`
-	Jmax             int      `json:"jmax"`
-	S1               int      `json:"s1"`
-	S2               int      `json:"s2"`
-	S3               int      `json:"s3"`
-	S4               int      `json:"s4"`
-	H1               uint32   `json:"h1"`
-	H2               uint32   `json:"h2"`
-	H3               uint32   `json:"h3"`
-	H4               uint32   `json:"h4"`
-	Adopted          bool     `json:"adopted"`
-	RebootRequired   bool     `json:"rebootRequired"`
-	Log              []string `json:"log"`
+	ServerPublicKey      string   `json:"serverPublicKey"`
+	Host                 string   `json:"host"`
+	Port                 int      `json:"port"`
+	ServerVpnAddress     string   `json:"serverVpnAddress"`
+	ClientVpnAddress     string   `json:"clientVpnAddress"`
+	ClientVpnAddressFull string   `json:"clientVpnAddressFull"`
+	Jc                   int      `json:"jc"`
+	Jmin                 int      `json:"jmin"`
+	Jmax                 int      `json:"jmax"`
+	S1                   int      `json:"s1"`
+	S2                   int      `json:"s2"`
+	S3                   int      `json:"s3"`
+	S4                   int      `json:"s4"`
+	H1                   uint32   `json:"h1"`
+	H2                   uint32   `json:"h2"`
+	H3                   uint32   `json:"h3"`
+	H4                   uint32   `json:"h4"`
+	Adopted              bool     `json:"adopted"`
+	RebootRequired       bool     `json:"rebootRequired"`
+	Log                  []string `json:"log"`
 }
 
 func (p Params) withDefaults() Params {
@@ -133,11 +137,18 @@ func Provision(sshCfg SSHConfig, params Params, clientPublicKey, clientPublicKey
 		return Result{}, perr
 	}
 	res.Host = sshCfg.Host
-	res.ClientVpnAddress = stripMask(params.ClientVpnAddress)
+	if clientPublicKeyFull != "" && res.ClientVpnAddressFull == "" {
+		return Result{}, fmt.Errorf("сервер не вернул адрес для Полного VPN (CLIENT_VPN_FULL)")
+	}
 	res.Adopted = strings.Contains(out, "MODE=adopt")
+	addrs := "прокси " + res.ClientVpnAddress
+	if res.ClientVpnAddressFull != "" {
+		addrs += ", Полный VPN " + res.ClientVpnAddressFull
+	}
 	if res.Adopted {
-		logf("Сервер уже настроен — добавлен peer, параметры прочитаны с сервера")
+		logf("Режим: донастройка, выделены адреса " + addrs + "; параметры прочитаны с сервера")
 	} else {
+		logf("Выделены адреса " + addrs)
 		logf("AmneziaWG установлен и настроен с нуля")
 	}
 	if res.RebootRequired {
@@ -300,6 +311,12 @@ func parseResult(out string) (Result, error) {
 	}
 	r.RebootRequired = get("NEEDS_REBOOT") == "1"
 	r.ServerVpnAddress = stripMask(get("SERVER_VPN"))
+	// Адреса клиента — фактические, выделенные сервером (не запрошенные).
+	r.ClientVpnAddress = stripMask(get("CLIENT_VPN"))
+	if r.ClientVpnAddress == "" {
+		return Result{}, fmt.Errorf("сервер не вернул адрес клиента (CLIENT_VPN)")
+	}
+	r.ClientVpnAddressFull = stripMask(get("CLIENT_VPN_FULL"))
 	r.Port = atoiDef(get("AWG_PORT"), 51820)
 	r.Jc = atoiDef(get("JC"), 0)
 	r.Jmin = atoiDef(get("JMIN"), 0)

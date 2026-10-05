@@ -17,21 +17,35 @@ VPS: `222.167.208.108`, Ubuntu 24.04, AmneziaWG на `awg0` (10.77.0.1/24), UDP 
 
 ## Добавить нового клиента (его публичный ключ)
 
-Публичный ключ клиента — из popover приложения (**Copy Public Key**) или из файла
-`~/Library/Application Support/ClaudeProxy/client-public.key`.
+Штатно — из приложения: «Развернуть» в окне серверов (`provision`) на уже настроенном VPS делает
+только донастройку — выделяет клиенту свободные адреса в подсети `awg0`, добавляет его
+peer'ы вживую и в конфиг, без перезапуска `awg0` (остальные клиенты не замечают). Повторный
+запуск для того же клиента ничего не меняет. Подробно — `docs/control-protocol.md` §provision.
+
+Вручную (если нужно без приложения). Публичный ключ клиента — из popover приложения
+(**Copy Public Key**) или из файла `~/Library/Application Support/ClaudeProxy/client-public.key`.
+Сначала найдите **свободный** адрес — занятые видны так:
+
+```bash
+awg show awg0 allowed-ips     # адреса всех текущих peer'ов
+grep -i allowedips /etc/amnezia/amneziawg/awg0.conf
+```
 
 ```bash
 CLIENT_PUB="<base64 публичный ключ>"
-# применить вживую
-awg set awg0 peer "$CLIENT_PUB" allowed-ips 10.77.0.2/32
+CLIENT_IP="10.77.0.N"          # свободный адрес из подсети awg0, не занятый никем выше
+# применить вживую (без перезапуска — остальные клиенты не рвутся)
+awg set awg0 peer "$CLIENT_PUB" allowed-ips "$CLIENT_IP/32"
 # сохранить в постоянный конфиг
 cd /etc/amnezia/amneziawg
-printf '\n[Peer]\nPublicKey = %s\nAllowedIPs = 10.77.0.2/32\n' "$CLIENT_PUB" >> awg0.conf
+printf '\n[Peer]\nPublicKey = %s\nAllowedIPs = %s/32\n' "$CLIENT_PUB" "$CLIENT_IP" >> awg0.conf
 awg-quick strip awg0 >/dev/null && echo "conf OK"
 ```
 
-> Один `10.77.0.2/32` — для одного активного клиента. Для нескольких клиентов выдавайте
-> разные адреса (10.77.0.3/32, …) и правьте `clientVpnAddress` в профиле приложения.
+> Адрес, уже выданный другому peer'у, брать нельзя: `awg set … allowed-ips` молча
+> отберёт его у старого peer'а, и тот клиент перестанет работать. Тот же адрес
+> пропишите в `clientVpnAddress` профиля приложения. Не делайте `systemctl restart
+> awg-quick@awg0` ради нового peer'а — это рвёт сессии всех клиентов.
 
 ## Проверки
 
