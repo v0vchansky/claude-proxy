@@ -19,6 +19,11 @@ final class CoreProcess {
         if isRunning { return true }
         guard let bin = AppPaths.coreBinary() else { return false }
 
+        // Убить возможное осиротевшее прокси-ядро, держащее порт 8118 (например после
+        // аварийного завершения приложения): иначе новое ядро не сможет поднять listener.
+        // Матчим по уникальному пути контрол-сокета — демон vpnd (/var/run/...) не затрагивается.
+        killStaleProxyCore()
+
         // Снять возможный stale-сокет.
         try? FileManager.default.removeItem(atPath: socketPath)
 
@@ -40,5 +45,16 @@ final class CoreProcess {
         guard let p = process, p.isRunning else { return }
         p.terminate()
         process = nil
+    }
+
+    /// pkill осиротевшего прокси-ядра по уникальному пути контрол-сокета.
+    private func killStaleProxyCore() {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
+        p.arguments = ["-f", "claude-proxy-core -sock \(socketPath)"]
+        p.standardOutput = FileHandle.nullDevice
+        p.standardError = FileHandle.nullDevice
+        try? p.run()
+        p.waitUntilExit()
     }
 }
