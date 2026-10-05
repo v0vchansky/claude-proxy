@@ -74,6 +74,9 @@ struct ServerProfile: Codable, Identifiable, Equatable {
     var port: Int
     var serverPublicKey: String
     var clientVpnAddress: String
+    /// Адрес клиента для Полного VPN (отдельный peer/ключ, адрес .3).
+    /// Старые servers.json без поля → дефолт 10.77.0.3 (см. init(from:)).
+    var clientVpnAddressFull: String = "10.77.0.3"
     var serverVpnAddress: String
     var dns: [String]
     var mtu: Int
@@ -91,6 +94,12 @@ struct ServerProfile: Codable, Identifiable, Equatable {
     var h3: UInt32
     var h4: UInt32
 
+    enum CodingKeys: String, CodingKey {
+        case id, displayName, country, provider, host, port, serverPublicKey,
+             clientVpnAddress, clientVpnAddressFull, serverVpnAddress, dns, mtu,
+             persistentKeepalive, jc, jmin, jmax, s1, s2, s3, s4, h1, h2, h3, h4
+    }
+
     /// Профиль HOSTKEY из ТЗ (без приватного ключа — он в Keychain).
     static let defaultHostkey = ServerProfile(
         id: "nl-hostkey",
@@ -101,6 +110,7 @@ struct ServerProfile: Codable, Identifiable, Equatable {
         port: 51820,
         serverPublicKey: "WyhFpvvdzC2OBhpbcRAMzVZXsyWgToZ/4vtVkgBo4F4=",
         clientVpnAddress: "10.77.0.2",
+        clientVpnAddressFull: "10.77.0.3",
         serverVpnAddress: "10.77.0.1",
         dns: ["1.1.1.1", "8.8.8.8"],
         mtu: 1420,
@@ -109,6 +119,40 @@ struct ServerProfile: Codable, Identifiable, Equatable {
         s1: 64, s2: 128, s3: 0, s4: 0,
         h1: 1000001, h2: 1000002, h3: 1000003, h4: 1000004
     )
+}
+
+extension ServerProfile {
+    /// Декодирование в расширении — чтобы сохранить авто-синтез memberwise-инициализатора
+    /// (на нём держится `defaultHostkey`) и авто-синтез Encodable. Терпимо к отсутствию
+    /// `clientVpnAddressFull`: старые servers.json без поля → дефолт 10.77.0.3
+    /// (авто-синтез декодера этого НЕ делает — он кидает keyNotFound).
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        displayName = try c.decode(String.self, forKey: .displayName)
+        country = try c.decode(String.self, forKey: .country)
+        provider = try c.decode(String.self, forKey: .provider)
+        host = try c.decode(String.self, forKey: .host)
+        port = try c.decode(Int.self, forKey: .port)
+        serverPublicKey = try c.decode(String.self, forKey: .serverPublicKey)
+        clientVpnAddress = try c.decode(String.self, forKey: .clientVpnAddress)
+        clientVpnAddressFull = try c.decodeIfPresent(String.self, forKey: .clientVpnAddressFull) ?? "10.77.0.3"
+        serverVpnAddress = try c.decode(String.self, forKey: .serverVpnAddress)
+        dns = try c.decode([String].self, forKey: .dns)
+        mtu = try c.decode(Int.self, forKey: .mtu)
+        persistentKeepalive = try c.decode(Int.self, forKey: .persistentKeepalive)
+        jc = try c.decode(Int.self, forKey: .jc)
+        jmin = try c.decode(Int.self, forKey: .jmin)
+        jmax = try c.decode(Int.self, forKey: .jmax)
+        s1 = try c.decode(Int.self, forKey: .s1)
+        s2 = try c.decode(Int.self, forKey: .s2)
+        s3 = try c.decode(Int.self, forKey: .s3)
+        s4 = try c.decode(Int.self, forKey: .s4)
+        h1 = try c.decode(UInt32.self, forKey: .h1)
+        h2 = try c.decode(UInt32.self, forKey: .h2)
+        h3 = try c.decode(UInt32.self, forKey: .h3)
+        h4 = try c.decode(UInt32.self, forKey: .h4)
+    }
 }
 
 /// Параметры SSH-доступа для автоматического развёртывания сервера.
@@ -128,6 +172,8 @@ struct ProvisionParams: Codable {
     var awgPort: Int = 51820
     var serverVpnAddress: String = "10.77.0.1"
     var clientVpnAddress: String = "10.77.0.2"
+    /// Адрес клиента для Полного VPN (второй peer/ключ). Ядро ждёт ключ `clientVpnAddressFull`.
+    var clientVpnAddressFull: String = "10.77.0.3"
     var jc: Int = 5
     var jmin: Int = 50
     var jmax: Int = 1000
@@ -174,6 +220,9 @@ struct ControlRequest: Encodable {
     var ssh: SSHConfig?
     var provision: ProvisionParams?
     var clientPublicKey: String?
+    // Публичный ключ клиента для Полного VPN (второй peer, адрес .3). Ядро ждёт
+    // ключ `clientPublicKeyFull`; при nil JSONEncoder его опускает.
+    var clientPublicKeyFull: String?
 }
 
 /// Ответ ядра.

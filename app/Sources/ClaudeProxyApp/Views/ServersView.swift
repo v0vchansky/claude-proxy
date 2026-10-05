@@ -42,16 +42,25 @@ struct ServersView: View {
         HStack {
             Text("Серверы").font(.title3).bold()
             Spacer()
-            // Публичный ключ клиента — добавляется на сервер при ручной настройке.
-            Button {
-                model.copyPublicKey()
-                copiedKey = true
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { copiedKey = false }
+            // Публичные ключи клиента — добавляются на сервер при ручной настройке.
+            // Нужны ОБА peer'а: прокси (адрес .2) и Полный VPN (адрес .3), иначе
+            // переключение режимов будет не бесшовным.
+            Menu {
+                Button("Публичный ключ (Прокси, .2)") {
+                    model.copyPublicKey()
+                    flashCopied()
+                }
+                Button("Публичный ключ (Полный VPN, .3)") {
+                    model.copyPublicKeyFull()
+                    flashCopied()
+                }
             } label: {
                 Label(copiedKey ? "Скопировано" : "Скопировать публичный ключ",
                       systemImage: copiedKey ? "checkmark" : "doc.on.doc")
             }
-            .help("Публичный ключ клиента для добавления на сервер")
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .help("Для бесшовного переключения на сервере нужны два peer'а: прокси (адрес .2) и Полный VPN (адрес .3)")
             Menu {
                 Button("Авто (по SSH)") {
                     model.resetProvisionState()
@@ -115,8 +124,11 @@ struct ServersView: View {
                             TextField("", text: $draft.serverPublicKey)
                                 .textFieldStyle(.roundedBorder).font(.system(.body, design: .monospaced))
                         }
-                        row("Адрес клиента в VPN") { TextField("", text: $draft.clientVpnAddress).textFieldStyle(.roundedBorder).frame(width: 160); Spacer(minLength: 0) }
+                        row("Адрес клиента (Прокси)") { TextField("", text: $draft.clientVpnAddress).textFieldStyle(.roundedBorder).frame(width: 160); Spacer(minLength: 0) }
+                        row("Адрес клиента (Полный VPN)") { TextField("", text: $draft.clientVpnAddressFull).textFieldStyle(.roundedBorder).frame(width: 160); Spacer(minLength: 0) }
                         row("Адрес сервера в VPN") { TextField("", text: $draft.serverVpnAddress).textFieldStyle(.roundedBorder).frame(width: 160); Spacer(minLength: 0) }
+                        Text("Для бесшовного переключения на сервере нужны два peer'а: прокси (адрес .2) и Полный VPN (адрес .3).")
+                            .font(.caption).foregroundStyle(.secondary)
                     }
                     section("AmneziaWG") {
                         Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 8) {
@@ -201,6 +213,11 @@ struct ServersView: View {
     }
 
     // MARK: - Actions
+
+    private func flashCopied() {
+        copiedKey = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { copiedKey = false }
+    }
 
     private func startNew() {
         var p = ServerProfile.defaultHostkey

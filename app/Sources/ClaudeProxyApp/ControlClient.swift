@@ -44,10 +44,12 @@ final class ControlClient: @unchecked Sendable {
                             ssh: SSHConfig? = nil,
                             provision: ProvisionParams? = nil,
                             clientPublicKey: String? = nil,
+                            clientPublicKeyFull: String? = nil,
                             as type: T.Type,
                             recvTimeout: TimeInterval = 30) throws -> T {
         let resp = try exchange(cmd, profile: profile, privateKey: privateKey, mode: mode,
                                 ssh: ssh, provision: provision, clientPublicKey: clientPublicKey,
+                                clientPublicKeyFull: clientPublicKeyFull,
                                 as: type, recvTimeout: recvTimeout)
         if !resp.ok {
             throw ControlError.core(resp.error ?? "неизвестная ошибка core")
@@ -67,10 +69,12 @@ final class ControlClient: @unchecked Sendable {
                                         ssh: SSHConfig? = nil,
                                         provision: ProvisionParams? = nil,
                                         clientPublicKey: String? = nil,
+                                        clientPublicKeyFull: String? = nil,
                                         as type: T.Type,
                                         recvTimeout: TimeInterval = 30) throws -> ControlResponse<T> {
         let req = ControlRequest(id: allocID(), cmd: cmd, profile: profile, privateKey: privateKey,
-                                 mode: mode, ssh: ssh, provision: provision, clientPublicKey: clientPublicKey)
+                                 mode: mode, ssh: ssh, provision: provision, clientPublicKey: clientPublicKey,
+                                 clientPublicKeyFull: clientPublicKeyFull)
         let data = try JSONEncoder().encode(req)
 
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
@@ -166,8 +170,10 @@ final class ControlClient: @unchecked Sendable {
 
     /// Разворачивает сервер по SSH. Долгая операция (установка пакета) — таймаут 240 с.
     /// При ошибке бросает `ProvisionFailure` с частичным логом шагов.
-    func provision(ssh: SSHConfig, params: ProvisionParams, clientPublicKey: String) throws -> ProvisionResult {
-        let resp = try exchange("provision", ssh: ssh, provision: params, clientPublicKey: clientPublicKey,
+    func provision(ssh: SSHConfig, params: ProvisionParams,
+                   clientPublicKey: String, clientPublicKeyFull: String) throws -> ProvisionResult {
+        let resp = try exchange("provision", ssh: ssh, provision: params,
+                                clientPublicKey: clientPublicKey, clientPublicKeyFull: clientPublicKeyFull,
                                 as: ProvisionResult.self, recvTimeout: 360)
         if resp.ok, let result = resp.result {
             return result

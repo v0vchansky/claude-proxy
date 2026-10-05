@@ -10,6 +10,8 @@ final class AppModel: ObservableObject {
     @Published var profiles: [ServerProfile] = []
     @Published var activeID: String = ""
     @Published var publicKey: String = ""
+    // Публичный ключ клиента для Полного VPN (второй peer, адрес .3).
+    @Published var publicKeyFull: String = ""
     @Published var uiError: String = ""
     @Published var busy: Bool = false
     @Published var coreAvailable: Bool = true
@@ -44,7 +46,10 @@ final class AppModel: ObservableObject {
     private let work = DispatchQueue(label: "claudeproxy.control")
     private var statusTimer: Timer?
     private var provisionTimer: Timer?
+    // Прокси-ключ (адрес .2) — как было.
     private var privateKeyB64: String = ""
+    // Ключ Полного VPN (адрес .3) — отдельный peer, чтобы туннели не конфликтовали.
+    private var privateKeyFullB64: String = ""
 
     init() {
         let sock = AppPaths.controlSocket.path
@@ -91,8 +96,10 @@ final class AppModel: ObservableObject {
         let shouldAuto = self.enableOnLaunch
         let p = self.active
         let pubFile = AppPaths.supportDir.appendingPathComponent("client-public.key")
+        let pubFileFull = AppPaths.supportDir.appendingPathComponent("client-public-full.key")
         work.async { [weak self] in
-            // 1. Ключи (в фоне, чтобы диалог Keychain не морозил приложение).
+            // 1. Ключи (в фоне, чтобы диалоги Keychain не морозили приложение). Грузим
+            //    ОБА ключа: прокси (.2) и Полный VPN (.3). Прокси-ключ не пересоздаём.
             var priv = "", pub = ""
             do {
                 priv = try ClientKey.loadOrCreatePrivateKeyBase64()
@@ -103,6 +110,19 @@ final class AppModel: ObservableObject {
             }
             if !priv.isEmpty {
                 DispatchQueue.main.async { self?.privateKeyB64 = priv; self?.publicKey = pub }
+            }
+
+            // Второй ключ (Полный VPN). Диалог Keychain для него — тоже в фоне.
+            var privFull = "", pubFull = ""
+            do {
+                privFull = try ClientKey.loadOrCreatePrivateKeyFullBase64()
+                pubFull = try ClientKey.publicKeyFullBase64()
+                try? (pubFull + "\n").data(using: .utf8)?.write(to: pubFileFull)
+            } catch {
+                DispatchQueue.main.async { self?.uiError = "Ошибка ключа VPN: \(error.localizedDescription)" }
+            }
+            if !privFull.isEmpty {
+                DispatchQueue.main.async { self?.privateKeyFullB64 = privFull; self?.publicKeyFull = pubFull }
             }
 
             // 2. Ждём готовности ядра (~5с).
@@ -257,9 +277,17 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Включить Proxy, предварительно погасив Full VPN.
+    /// Включить Proxy (бесшовно из Полного VPN, вариант с двумя ключами).
+    /// Порядок:
+    ///  1) `client.connect(proxyProfile, privateKeyB64)` — поднять WG-туннель прокси
+    ///     (ключ №1, адрес .2), ПОКА Полный VPN ещё активен. Разные ключи не конфликтуют;
+    ///     UDP ключа №1 к серверу идёт по host-маршруту, который держит Полный VPN.
+    ///     connect сам ставит forwardMode=tunnel → 8118 переключается на свой туннель.
+    ///  2) `vpn.disconnectFull()` — опустить Полный VPN; маршруты восстановятся, прокси
+    ///     продолжает работать через ключ №1. 8118 ни на миг без backend.
+    /// Если connect прокси не удался — Полный VPN НЕ опускаем (остаёмся со связью), ошибка.
     func enterProxy() {
-        if active == nil {
+        guard let p = self.active else {
             uiError = "Нет активного сервера — добавьте сервер в Серверы…"
             return
         }
@@ -267,23 +295,20 @@ final class AppModel: ObservableObject {
         uiError = ""
         let client = self.client
         let vpn = self.vpnClient
-        let p = self.active
         let key = self.privateKeyB64
         let vpnWasUp = vpnStatus.state == .connected || vpnStatus.state == .connecting
         work.async { [weak self] in
+            // 1. Поднять туннель прокси, пока Полный VPN ещё держит маршруты.
+            let result = Result { try client.connect(p, privateKey: key) }
+            // 2. Только при успешном connect опускаем Полный VPN — иначе остались бы без связи.
             var vpnState: VpnStatus?
-            if vpnWasUp {
-                // §8 + fail-closed: сперва вернуть прокси из direct, затем опустить
-                // Полный VPN. direct не должен пережить падение системного utun.
-                _ = try? client.forward(mode: "off")
+            var vpnWentDown = false
+            if vpnWasUp, case .success(let st) = result, st.state == .connected {
                 vpnState = try? vpn.disconnectFull()
+                vpnWentDown = true
             }
-            // connect сам поставит forwardMode=tunnel; listener 8118 жив весь переход.
-            let result: Result<CoreState, Error>
-            if let p { result = Result { try client.connect(p, privateKey: key) } }
-            else { result = Result { try client.disconnect() } }
             DispatchQueue.main.async {
-                if let vs = vpnState { self?.vpnStatus = vs } else if vpnWasUp { self?.vpnStatus = VpnStatus() }
+                if let vs = vpnState { self?.vpnStatus = vs } else if vpnWentDown { self?.vpnStatus = VpnStatus() }
                 self?.apply(result)
             }
         }
@@ -303,38 +328,48 @@ final class AppModel: ObservableObject {
         enterFullVPN()
     }
 
-    /// Включить Full VPN (вариант А). Порядок строго fail-closed:
-    /// 1) поднять Полный VPN;
-    /// 2) ТОЛЬКО при успехе — опустить WG-туннель прокси (listener 8118 остаётся жив,
-    ///    §8: два туннеля на одном WG-ключе не держим) и перевести форвард в direct,
-    ///    чтобы 8118 заворачивал трафик в системный utun Полного VPN;
-    /// 3) если connectFull упал — форвард НЕ трогаем (остаётся как был), показываем ошибку.
-    /// direct НИКОГДА не включается без поднятого Полного VPN.
+    /// Профиль для Полного VPN — копия активного профиля с адресом клиента .3
+    /// (vpnd поднимет utun с этим адресом; Go-ядро берёт адрес из profile.clientVpnAddress).
+    private func makeFullProfile(_ p: ServerProfile) -> ServerProfile {
+        var f = p
+        f.clientVpnAddress = p.clientVpnAddressFull
+        return f
+    }
+
+    /// Включить Full VPN (бесшовно из Прокси, вариант с двумя ключами).
+    /// Full VPN использует профиль с clientVpnAddress=.3 и privateKeyFullB64; прокси —
+    /// профиль с .2 и privateKeyB64. Разные ключи = разные peer'ы, туннели не конфликтуют.
+    /// Порядок:
+    ///  1) `vpn.connectFull(fullProfile, privateKeyFullB64)` — поднять Полный VPN на ключе №2.
+    ///     Прокси (ключ №1) ПРОДОЛЖАЕТ работать — его туннель не трогаем, 8118 всё это
+    ///     время dial-ит через свой WG-туннель (никакого окна).
+    ///  2) ТОЛЬКО при успехе connected: `client.forward("direct")` — прокси переключается
+    ///     на прямой dial через системный utun. forward direct идёт ДО disconnect, чтобы
+    ///     8118 ни на миг не остался без backend.
+    ///  3) `client.disconnect()` — опустить ненужный WG-туннель прокси (ключ №1). Listener 8118 жив.
+    ///  4) При неудаче connectFull — ничего не откатываем (прокси как был, forward tunnel), ошибка.
     private func enterFullVPN() {
+        guard let p = self.active else {
+            uiError = "Нет активного сервера — добавьте сервер в Серверы…"
+            return
+        }
         vpnBusy = true
         uiError = ""
         let client = self.client
         let vpn = self.vpnClient
-        let p = self.active
-        let key = self.privateKeyB64
-        let proxyWasUp = core.state != .disconnected
+        let fullProfile = makeFullProfile(p)
+        let keyFull = self.privateKeyFullB64
         work.async { [weak self] in
-            guard let p else { DispatchQueue.main.async { self?.vpnBusy = false }; return }
-            // 1. СНАЧАЛА опускаем WG-туннель прокси, чтобы освободить ключ. Иначе два
-            //    туннеля с одним ключом одновременно долбятся в сервер — он «мечется»
-            //    между источниками (WireGuard roaming flap) и рвёт связь на все секунды
-            //    handshake Полного VPN. Listener 8118 при этом остаётся жив.
-            if proxyWasUp { _ = try? client.disconnect() }
-            // 2. Поднять Полный VPN — ключ свободен, handshake чистый и быстрый.
-            let result = Result { try vpn.connectFull(profile: p, privateKey: key) }
+            // 1. Поднять Полный VPN на ключе №2 (.3). Прокси (ключ №1) продолжает работать.
+            let result = Result { try vpn.connectFull(profile: fullProfile, privateKey: keyFull) }
             var proxyState: CoreState?
             if case .success(let vs) = result, vs.state == .connected {
-                // 3. Прокси резюмирует через системный utun (direct): 8118 снова рабочий.
+                // 2. Прокси резюмирует через системный utun (direct): 8118 без окна простоя.
                 proxyState = try? client.forward(mode: "direct")
-            } else if proxyWasUp {
-                // Не удалось поднять Полный VPN — вернуть прокси, чтобы не остаться без связи.
-                proxyState = try? client.connect(p, privateKey: key)
+                // 3. Опустить ненужный WG-туннель прокси (ключ №1). Listener 8118 жив.
+                if let st = try? client.disconnect() { proxyState = st }
             }
+            // 4. При неудаче connectFull форвард/туннель прокси НЕ трогаем — прокси как был.
             DispatchQueue.main.async {
                 if let ps = proxyState { self?.core = ps }
                 self?.applyVpn(result)
@@ -519,9 +554,13 @@ final class AppModel: ObservableObject {
 
         let client = self.client
         let pub = self.publicKey
+        let pubFull = self.publicKeyFull
         work.async { [weak self] in
             do {
-                let res = try client.provision(ssh: ssh, params: params, clientPublicKey: pub)
+                // Шлём ОБА публичных ключа: прокси (.2) и Полный VPN (.3) — сервер заводит
+                // два peer'а, чтобы переключение режимов было бесшовным.
+                let res = try client.provision(ssh: ssh, params: params,
+                                               clientPublicKey: pub, clientPublicKeyFull: pubFull)
                 let id = "srv-" + UUID().uuidString.prefix(8).lowercased()
                 let profile = ServerProfile(
                     id: id,
@@ -532,6 +571,7 @@ final class AppModel: ObservableObject {
                     port: res.port,
                     serverPublicKey: res.serverPublicKey,
                     clientVpnAddress: res.clientVpnAddress,
+                    clientVpnAddressFull: params.clientVpnAddressFull,
                     serverVpnAddress: res.serverVpnAddress,
                     dns: ["1.1.1.1", "8.8.8.8"],
                     mtu: 1420,
@@ -593,6 +633,8 @@ final class AppModel: ObservableObject {
     // MARK: - Clipboard
 
     func copyPublicKey() { setClipboard(publicKey) }
+    /// Публичный ключ клиента для Полного VPN (второй peer, адрес .3).
+    func copyPublicKeyFull() { setClipboard(publicKeyFull) }
     func copyClaudeCommand() { setClipboard(claudeCommand) }
 
     /// Обновляет журнал для встроенного просмотрщика: читает `client.logs()`
