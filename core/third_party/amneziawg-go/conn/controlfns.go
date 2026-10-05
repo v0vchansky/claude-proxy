@@ -29,11 +29,21 @@ var controlFns = []controlFn{}
 // listenConfig returns a net.ListenConfig that applies the controlFns to the
 // socket prior to bind. This is used to apply socket buffer sizing and packet
 // information OOB configuration for sticky sockets.
-func listenConfig() *net.ListenConfig {
+//
+// extra — опциональный per-bind control-хук (напр. IP_BOUND_IF). Он применяется
+// ПОСЛЕ глобальных controlFns и, в отличие от них, живёт на экземпляре Bind, а не
+// в global init: это позволяет привязать конкретный Bind к физическому интерфейсу,
+// не затрагивая остальные Bind'ы в процессе. nil = поведение как раньше.
+func listenConfig(extra controlFn) *net.ListenConfig {
 	return &net.ListenConfig{
 		Control: func(network, address string, c syscall.RawConn) error {
 			for _, fn := range controlFns {
 				if err := fn(network, address, c); err != nil {
+					return err
+				}
+			}
+			if extra != nil {
+				if err := extra(network, address, c); err != nil {
 					return err
 				}
 			}

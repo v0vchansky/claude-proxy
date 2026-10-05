@@ -35,11 +35,23 @@ type Stats struct {
 // Open поднимает netstack-устройство и applies uapi-конфиг профиля.
 // logf — приёмник verbose-логов устройства (может быть nil). Секреты туда не уходят:
 // device логирует только метаданные, приватный ключ в лог не пишет.
-func Open(p profile.Profile, privateKeyB64 string, logf func(format string, args ...any)) (*Tunnel, error) {
+//
+// boundIf — имя физического интерфейса (en0/en1/…), к которому ПРИНУДИТЕЛЬНО
+// привязывается UDP-транспорт WG через IP_BOUND_IF. Пусто = прежнее поведение
+// (conn.NewDefaultBind, маршрутизация по таблице). Непустое имя заставляет
+// исходящие датаграммы туннеля всегда идти через этот интерфейс, минуя utun
+// Полного VPN: поднятие/опускание его utun тогда не касается прокси-туннеля —
+// это и даёт ноль потерь при переключении Полного VPN. См. bindForInterface.
+func Open(p profile.Profile, privateKeyB64 string, logf func(format string, args ...any), boundIf string) (*Tunnel, error) {
 	if err := p.Validate(); err != nil {
 		return nil, err
 	}
 	clientAddr, err := p.ClientAddr()
+	if err != nil {
+		return nil, err
+	}
+
+	bind, err := bindForInterface(boundIf)
 	if err != nil {
 		return nil, err
 	}
@@ -61,7 +73,7 @@ func Open(p profile.Profile, privateKeyB64 string, logf func(format string, args
 		}
 	}
 
-	dev := device.NewDevice(tunDev, conn.NewDefaultBind(), logger)
+	dev := device.NewDevice(tunDev, bind, logger)
 
 	uapi, err := p.BuildUAPI(privateKeyB64)
 	if err != nil {
@@ -161,6 +173,23 @@ func (t *Tunnel) Close() error {
 		t.dev.Close()
 	}
 	return nil
+}
+
+// bindForInterface выбирает UDP-bind для устройства WG.
+//
+// Пустое имя → conn.NewDefaultBind() (прежнее поведение, маршрутизация по таблице).
+// Непустое имя резолвится в индекс интерфейса (net.InterfaceByName, не требует root)
+// и отдаётся в conn.NewStdNetBindForInterface — bind с IP_BOUND_IF на этот индекс.
+// Несуществующее имя интерфейса → ошибка (fail-closed: не молчим про опечатку в конфиге).
+func bindForInterface(boundIf string) (conn.Bind, error) {
+	if boundIf == "" {
+		return conn.NewDefaultBind(), nil
+	}
+	iface, err := net.InterfaceByName(boundIf)
+	if err != nil {
+		return nil, fmt.Errorf("привязка к интерфейсу %q: %w", boundIf, err)
+	}
+	return conn.NewStdNetBindForInterface(iface.Index), nil
 }
 
 func silentLogger() *device.Logger {

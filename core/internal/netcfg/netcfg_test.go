@@ -230,3 +230,39 @@ func TestLiveCapture(t *testing.T) {
 	}
 	t.Logf("live snapshot: default=%+v services=%d", snap.DefaultRoute, len(snap.Services))
 }
+
+func TestPhysicalInterfaceSkipsForeignVPN(t *testing.T) {
+	orig := runner
+	defer func() { runner = orig }()
+	// Тот же фикстур с активным сторонним utun4 (link#26): должен вернуть физический en0.
+	runner = fakeRunner(map[string]string{"netstat": fixtureNetstat}, nil)
+
+	dev, err := PhysicalInterface(context.Background())
+	if err != nil {
+		t.Fatalf("PhysicalInterface: %v", err)
+	}
+	if dev != "en0" {
+		t.Errorf("device: got %q, want физический en0 (не utun/link#)", dev)
+	}
+}
+
+func TestPhysicalInterfacePropagatesCommandError(t *testing.T) {
+	orig := runner
+	defer func() { runner = orig }()
+	runner = fakeRunner(nil, map[string]error{"netstat": fmt.Errorf("netstat недоступен")})
+	if _, err := PhysicalInterface(context.Background()); err == nil {
+		t.Fatal("ожидалась ошибка, если netstat недоступен")
+	}
+}
+
+func TestPhysicalInterfaceNoPhysicalDefault(t *testing.T) {
+	orig := runner
+	defer func() { runner = orig }()
+	// Единственный default — чужой utun через link#; физического next-hop нет.
+	runner = fakeRunner(map[string]string{"netstat": `Destination        Gateway            Flags               Netif Expire
+default            link#26            UCSg                utun4
+`}, nil)
+	if _, err := PhysicalInterface(context.Background()); err == nil {
+		t.Fatal("ожидалась ошибка: физического default нет (только link#)")
+	}
+}

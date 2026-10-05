@@ -46,6 +46,11 @@ type StdNetBind struct {
 
 	blackhole4 bool
 	blackhole6 bool
+
+	// extraControl — per-bind control-хук, применяемый к UDP-сокетам при Open ПОСЛЕ
+	// глобальных controlFns (напр. IP_BOUND_IF для привязки транспорта WG к
+	// физическому интерфейсу). nil у NewStdNetBind/NewDefaultBind — прежнее поведение.
+	extraControl controlFn
 }
 
 func NewStdNetBind() Bind {
@@ -119,8 +124,8 @@ func (e *StdNetEndpoint) DstToString() string {
 	return e.AddrPort.String()
 }
 
-func listenNet(network string, port int) (*net.UDPConn, int, error) {
-	conn, err := listenConfig().ListenPacket(context.Background(), network, ":"+strconv.Itoa(port))
+func listenNet(network string, port int, extra controlFn) (*net.UDPConn, int, error) {
+	conn, err := listenConfig(extra).ListenPacket(context.Background(), network, ":"+strconv.Itoa(port))
 	if err != nil {
 		return nil, 0, err
 	}
@@ -156,13 +161,13 @@ again:
 	var v4pc *ipv4.PacketConn
 	var v6pc *ipv6.PacketConn
 
-	v4conn, port, err = listenNet("udp4", port)
+	v4conn, port, err = listenNet("udp4", port, s.extraControl)
 	if err != nil && !errors.Is(err, syscall.EAFNOSUPPORT) {
 		return nil, 0, err
 	}
 
 	// Listen on the same port as we're using for ipv4.
-	v6conn, port, err = listenNet("udp6", port)
+	v6conn, port, err = listenNet("udp6", port, s.extraControl)
 	if uport == 0 && errors.Is(err, syscall.EADDRINUSE) && tries < 100 {
 		v4conn.Close()
 		tries++

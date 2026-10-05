@@ -40,6 +40,30 @@ func runCommand(ctx context.Context, name string, args ...string) (string, error
 	return string(out), nil
 }
 
+// PhysicalInterface возвращает имя физического default-интерфейса (en0/en1/…),
+// игнорируя utun стороннего/системного VPN (строки default с link#-шлюзом).
+//
+// Это лёгкий срез Capture: дёргает только `netstat -rn -f inet` и парсит его тем
+// же parseDefaultRoute (метод wg-quick darwin, §2.4). Прокси-ядро зовёт его при
+// connect, чтобы привязать WG-транспорт к физическому интерфейсу через IP_BOUND_IF
+// (tunnel.Open boundIf) — ДО и независимо от Полного VPN. Отдельная функция, а не
+// полный Capture, намеренно: не тащим per-service DNS-опрос в путь подключения
+// прокси (он не нужен и мог бы упасть на капризном сервисе).
+func PhysicalInterface(ctx context.Context) (string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	routeOut, err := runner(ctx, "netstat", "-rn", "-f", "inet")
+	if err != nil {
+		return "", err
+	}
+	_, device, err := parseDefaultRoute(routeOut)
+	if err != nil {
+		return "", err
+	}
+	return device, nil
+}
+
 // Capture снимает read-only снимок сетевой конфигурации macOS.
 //
 // Дёргает (ничего не меняя):

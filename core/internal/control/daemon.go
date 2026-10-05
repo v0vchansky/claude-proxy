@@ -9,6 +9,7 @@ import (
 
 	"github.com/v0vchansky/claude-proxy/core/internal/health"
 	"github.com/v0vchansky/claude-proxy/core/internal/logbuf"
+	"github.com/v0vchansky/claude-proxy/core/internal/netcfg"
 	"github.com/v0vchansky/claude-proxy/core/internal/profile"
 	"github.com/v0vchansky/claude-proxy/core/internal/provision"
 	"github.com/v0vchansky/claude-proxy/core/internal/proxy"
@@ -250,7 +251,25 @@ func (d *Daemon) bringUp(p profile.Profile, privateKey string) error {
 	if d.verbose {
 		devLog = d.log.Logf
 	}
-	t, err := tunnel.Open(p, privateKey, devLog)
+
+	// Физический интерфейс для привязки WG-транспорта прокси через IP_BOUND_IF.
+	// Берём ВСЕГДА (не только под Полным VPN): netcfg отдаёт физический default,
+	// игнорируя utun, поэтому прокси-туннель постоянно сидит на физике и поднятие/
+	// опускание utun Полного VPN его не трогает — ноль потерь при переключении.
+	// Best-effort: не смогли определить → пустой boundIf (прежнее поведение); это не
+	// рвёт connect при выключенном Полном VPN, а под ним единственный риск — петля,
+	// о которой честно пишем в лог.
+	bctx, bcancel := context.WithTimeout(context.Background(), 8*time.Second)
+	boundIf, berrIf := netcfg.PhysicalInterface(bctx)
+	bcancel()
+	if berrIf != nil {
+		d.log.Logf("Physical interface undetected (%v); binding tunnel by routing table", berrIf)
+		boundIf = ""
+	} else {
+		d.log.Logf("Binding tunnel UDP to physical interface %s", boundIf)
+	}
+
+	t, err := tunnel.Open(p, privateKey, devLog, boundIf)
 	if err != nil {
 		return err
 	}
